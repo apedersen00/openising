@@ -30,7 +30,6 @@ __pycache__/
 *.png
 *.jpg
 ising/*/*.pdf
-*.csv
 *.prof
 
 # Config yaml files
