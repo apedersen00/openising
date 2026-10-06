@@ -9,6 +9,9 @@
 *.pkl
 __marimo__
 
+# egg
+*.egg-info
+
 # environment stuff
 .env
 .venv
