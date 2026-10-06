@@ -202,9 +202,23 @@ def _(bench_results):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Save Results
+    """)
+    return
+
+
 @app.cell
-def _(BENCHMARKS, SOLVERS, bench_results, plt):
-    _df  = bench_results.copy()
+def _(bench_results):
+    bench_results.to_csv('../data/bench_results.csv', index=False)
+    return
+
+
+@app.cell
+def _(BENCHMARKS, SOLVERS, pd, plt):
+    _df  = pd.read_csv('../data/bench_results.csv')
     _df['eps'] = abs(_df.energy - _df.best_found) / abs(_df.best_found)
 
     _fig, _axs = plt.subplots(1, len(BENCHMARKS), figsize=(15, 4))
