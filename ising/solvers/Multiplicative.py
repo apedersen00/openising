@@ -12,18 +12,25 @@ from ising.utils.numpy import triu_to_symm
 
 @njit(cache=True)
 def _inner_loop_FE_numba(
-    coupling,
-    state,
-    dv,
-    dt,
-    dv_scale,
-    freeze_nodes,
-    bias,
-    num_iterations,
-    stop_criterion,
-    tau_system,
-    ops_per_tau
-):
+        coupling,
+        state,
+        dv,
+        dt,
+        dv_scale,
+        freeze_nodes,
+        bias,
+        num_iterations,
+        stop_criterion,
+        tau_system,
+        ops_per_tau
+    ):
+    """
+    Fast implementation of the inner FE loop for the Multiplicative solver.
+
+    This is path is *only* taken if total_delay = 0.
+
+    Optimization is done by compiling to machine code via Numba.
+    """
     # set up the simulation
     i = 0
     max_change = np.inf
