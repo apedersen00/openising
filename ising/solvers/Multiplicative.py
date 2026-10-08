@@ -151,7 +151,13 @@ class Multiplicative(SolverBase):
                 norm_prev = np.linalg.norm(previous_states[-1])
                 max_change = np.max(diff) / (norm_prev if norm_prev != 0 else 1)
 
-            previous_states = np.block([[np.sign(new_state)], [previous_states]])[:-1, :]
+            # The below implementation replaces:
+            # previous_states = np.block([[np.sign(new_state)], [previous_states]])[:-1, :]
+            # np.block is slow as it copies and creates a new matrix. Instead we modify the same matrix
+            # sliding the states and setting the first entry to the newest state
+            previous_states[1:] = previous_states[:-1]
+            previous_states[0] = np.sign(new_state)
+
             state = new_state.copy()
             i += 1
             if logging is not None:
