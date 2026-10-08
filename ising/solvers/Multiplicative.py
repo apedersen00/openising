@@ -33,7 +33,7 @@ def _inner_loop_FE_numba(
     state = state.copy()
     new_state = state.copy()
 
-    # States needed for delay calculation. The newest state is always appended to the end of the list.
+    # previous_states with total_delay = 0 is a single row
     prev_sign = np.sign(state)
     counter = 1
     time_zero = 0.0
@@ -48,7 +48,6 @@ def _inner_loop_FE_numba(
             if bias:
                 dv[-1] = 0.0
 
-
         for k in freeze_nodes:
             dv[k] = 0.0
 
@@ -57,7 +56,7 @@ def _inner_loop_FE_numba(
         for k in range(n):
             v = state[k] + dt * dv[k]
             v = min(max(v, np.float32(-1.0)), np.float32(1.0))
-            if np.sign(v) != np.sign(state[k])
+            if np.sign(v) != np.sign(state[k]):
                 flipped = True
             new_state[k] = v
         if flipped:
@@ -277,7 +276,7 @@ class Multiplicative(SolverBase):
             self.tau_system,
             2 * model.num_variables**2 + 3 * model.num_variables,
         )
-        sample = np.where(final_state[:, model.num_variables] >= 0, 1, -1).astype(np.float32)
+        sample = np.where(final_state[:model.num_variables] >= 0, 1, -1).astype(np.float32)
         return sample, model.evaluate(sample), i * self.dt, nb_operations
 
 
