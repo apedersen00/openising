@@ -18,10 +18,16 @@ def _(mo):
 
 @app.cell
 def _():
+    import os
     import yaml
     import time
     import logging
     import tempfile
+    import subprocess
+    import platform
+    import datetime
+    import pathlib
+    import numba
     from argparse import Namespace
 
     import pandas as pd
@@ -41,8 +47,15 @@ def _():
         Namespace,
         SimulationStage,
         TOP,
+        datetime,
+        np,
+        numba,
+        os,
         parse_hyperparameters,
+        pathlib,
         pd,
+        platform,
+        subprocess,
         time,
         yaml,
     )
@@ -108,13 +121,13 @@ def _(MaxcutParserStage, Namespace, TOP, yaml):
         configs = {}
         for solver, overrides in solvers.items():
             configs[solver] = Namespace(**(common_cfg | overrides | {'solvers': [solver]}))
-    
+
         return configs
 
     configs = make_configs(SOLVERS, BENCHMARK, EFFORT)
     graph, best_found = MaxcutParserStage.G_parser(TOP / BENCHMARK)
     model = MaxcutParserStage.generate_maxcut(graph)
-    return NB_TRIALS, configs, model
+    return BENCHMARK, EFFORT, NB_TRIALS, configs, model
 
 
 @app.cell(hide_code=True)
@@ -169,6 +182,54 @@ def _(
 @app.cell
 def _(results):
     results
+    return
+
+
+@app.cell
+def _(
+    BENCHMARK,
+    EFFORT,
+    TOP,
+    configs,
+    datetime,
+    np,
+    numba,
+    os,
+    pathlib,
+    platform,
+    results,
+    subprocess,
+    yaml,
+):
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=TOP, capture_output=True, text=True).stdout.strip()
+
+    def run_metadata(label, benchmark, effort):
+        return {
+            'label'      : label,
+            'commit'     : git('rev-parse', '--short', 'HEAD'),
+            'dirty'      : git('status', '--porcelain') != '',
+            'date'       : datetime.datetime.now().isoformat(timespec='seconds'),
+            'benchmark'  : pathlib.Path(benchmark).stem,
+            'effort'     : effort,
+            'cpu'        : next(l.split(':', 1)[1].strip() for l in open('/proc/cpuinfo') if l.startswith('model name')),
+            'affinity'   : ','.join(map(str, sorted(os.sched_getaffinity(0)))),
+            'omp_threads': os.environ.get('OMP_NUM_THREADS', ''),
+            'python'     : platform.python_version(),
+            'numpy'      : np.__version__,
+            'numba'      : numba.__version__,
+        }
+
+    def save_results(results, configs, label, benchmark, effort):
+        meta = run_metadata(label, benchmark, effort)
+        out = TOP / 'data/speed' / f"{meta['benchmark']}_effort{effort}_{label}_{meta['commit']}.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        results.assign(**meta).to_csv(out, index=False, float_format='%.17g')
+        with open(out.with_suffix('.yaml'), 'w') as f:
+            yaml.safe_dump({solver: vars(cfg) for solver, cfg in configs.items()}, f)
+        return out
+
+    save_results(results, configs, 'baseline', BENCHMARK, EFFORT)
     return
 
 
