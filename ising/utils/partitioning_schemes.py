@@ -15,15 +15,33 @@ def make_random_partitioning(model: IsingModel, nb_cores: int) -> np.ndarray:
         labels[nodes] = part_id
     return labels
 
+def make_greedy_partitioning(model: IsingModel, nb_cores: int) -> np.ndarray:
+    G = nx.Graph(model.J)
+    parts = nx.algorithms.community.greedy_modularity_communities(G, cutoff=nb_cores, best_n=nb_cores)
+    labels = np.empty(model.num_variables, dtype=int)
+    for label, part in enumerate(parts):
+        labels[list(part)] = label
+    return labels
+
 def make_modularity_partitioning(model: IsingModel, nb_cores: int) -> np.ndarray:
     return partition_by_eigenvector(model, nb_cores, spectral=False)
 
 def make_spectral_partitioning( model: IsingModel, nb_cores: int) -> np.ndarray:
     return partition_by_eigenvector(model, nb_cores, spectral=True)
 
+LOUVAIN_RUNS = 20
+
 def make_louvain_partitioning(model: IsingModel, nb_cores:int) -> np.ndarray:
+    """Return the louvain split with the highest modularity over LOUVAIN_RUNS runs (seeds 0, 1, ...).
+
+    Louvain chooses the number of partitions itself: nb_cores is not used.
+    """
     G = nx.Graph(model.J)
-    partitions = nx.algorithms.community.louvain_communities(G, max_level=int(nb_cores/2))
+    community = nx.algorithms.community
+    partitions = max(
+        (community.louvain_communities(G, seed=seed) for seed in range(LOUVAIN_RUNS)),
+        key=lambda partitions: community.modularity(G, partitions),
+    )
     labels = np.empty(model.num_variables, dtype=int)
     for label, partition in enumerate(partitions):
         labels[list(partition)] = label

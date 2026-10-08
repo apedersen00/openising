@@ -8,12 +8,22 @@ from ising.solvers.base import SolverBase
 from ising.stages.model.ising import IsingModel
 from ising.utils.numpy import triu_to_symm
 from ising.utils.HDF5Logger import HDF5Logger
+
 from ising.utils.partitioning_schemes import (
     make_louvain_partitioning,
     make_modularity_partitioning,
     make_random_partitioning,
+    make_greedy_partitioning,
     make_spectral_partitioning,
 )
+
+PARTITIONERS = {
+    "random": make_random_partitioning,
+    "modularity": make_modularity_partitioning,
+    "spectral": make_spectral_partitioning,
+    "greedy": make_greedy_partitioning,
+    "louvain": make_louvain_partitioning,
+}
 
 
 @dataclass
@@ -97,9 +107,10 @@ class HierarchicalSolver(SolverBase):
         @param core_solver: solver instance used for both the upper model and lower subproblems.
             Its solve method returns state, energy, time, operation count, and iteration count.
         @type partitioning_technique: str
-        @param partitioning_technique: partitioning method: "random", "modularity", or "spectral".
+        @param partitioning_technique: partitioning method: "random", "modularity", "spectral", or "greedy".
         @type nb_partitions: int
-        @param nb_partitions: the number of lower subproblems to create.
+        @param nb_partitions: the number of lower subproblems asked of the partitioner. The number it
+            returns is the one used: it can differ for a community algorithm such as "louvain".
         @type nb_meta_nodes: int or None
         @param nb_meta_nodes: the total number of meta-nodes in the upper model.
             If None, use the number of original nodes in the first partition.
@@ -111,21 +122,26 @@ class HierarchicalSolver(SolverBase):
         @return: the final state in original-node order, its energy on the original model,
             total time, operation count, and number of sweeps.
         """
+        # Let's decompose the solver into different steps (which can be then implmented in different way by doing subclass of this class)
+        # check boundaries
         if nb_sweeps < 0:
             raise ValueError("Number of sweeps cannot be negative")
-
-        partitioners = {
-            "random": make_random_partitioning,
-            "modularity": make_modularity_partitioning,
-            "spectral": make_spectral_partitioning,
-            "louvain": make_louvain_partitioning,
-        }
-        if partitioning_technique not in partitioners:
+        if partitioning_technique not in PARTITIONERS:
             raise ValueError(f"Partitioning technique {partitioning_technique} does not exist.")
-        partitioning = partitioners[partitioning_technique](model, nb_partitions)
+        if nb_partitions <= 0:
+            raise ValueError("Number of partitions must be positive")
+        if nb_meta_nodes is not None and nb_meta_nodes <= 0:
+            raise ValueError("Number of meta-nodes must be positive or None")
+              
+        
+        # 1. create hierarchy (upper model and lower subproblems) from the original model
+        partitioning = PARTITIONERS[partitioning_technique](model, nb_partitions)
+        # A partitioner may return another number of partitions than requested (e.g. louvain).
+        nb_partitions = len(np.unique(partitioning))
         self.make_hierarchy(model, partitioning, nb_meta_nodes)
         self.initialize(initial_state)
 
+        
         schema = {
             "time": np.float32,
             "energy": np.float32,

@@ -1,0 +1,10 @@
+nb_cores,nb_meta_nodes,solver,en_min, en_max, en_25, en_50, en_75
+1,0,Multiplicative,-148.0,-146.0,-148.0,-146.0,-146.0
+4,1,Hierarchical_solver,-148.0,-146.0,-148.0,-146.0,-146.0
+2,1,Hierarchical_solver,-148.0,-146.0,-148.0,-146.0,-146.0
+2,2,Hierarchical_solver,-148.0,-148.0,-148.0,-148.0,-148.0
+2,4,Hierarchical_solver,-116.0,-116.0,-116.0,-116.0,-116.0
+2,3,Hierarchical_solver,-116.0,-116.0,-116.0,-116.0,-116.0
+4,2,Hierarchical_solver,-82.0,-82.0,-82.0,-82.0,-82.0
+2,5,Hierarchical_solver,-116.0,-116.0,-116.0,-116.0,-116.0
+4,3,Hierarchical_solver,-82.0,-82.0,-82.0,-82.0,-82.0
