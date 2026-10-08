@@ -32,6 +32,7 @@ def _():
     import cProfile
     import pstats
     import io
+    import marimo as mo
 
     import pandas as pd
     import numpy as np
@@ -59,6 +60,7 @@ def _():
         cProfile,
         datetime,
         io,
+        mo,
         np,
         numba,
         os,
@@ -66,6 +68,7 @@ def _():
         pathlib,
         pd,
         platform,
+        plt,
         pstats,
         subprocess,
         time,
@@ -100,7 +103,7 @@ def _(MaxcutParserStage, Namespace, TOP, yaml):
         'SCA'                   : {},
         'bSB'                   : {},
         'dSB'                   : {},
-        'BRIM'                  : {},
+        # 'BRIM'                  : {},
         'Multiplicative'        : _mult,
         'Hierarchical_solver'   : _mult | {
             'core_solver'                   : 'Multiplicative',
@@ -334,6 +337,89 @@ def _(mo):
 
     #### `HierarchicalSolver.py`: 97.4% of time spent in upper_J[i, j] loop (line 243)
     """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Performance Results
+
+    AI-generated plotting code!
+    """)
+    return
+
+
+@app.cell
+def _(TOP, mo, np, pd, plt):
+    def load_run(name):
+        return pd.read_csv(TOP / 'data/speed' / name)
+
+    def compare_runs(old, new):
+        """Per solver: do all trials give the same energy, and how much faster is the new run?"""
+        both = old.merge(new, on=['solver', 'trial'], suffixes=('_old', '_new'))
+        both['same_energy'] = both.energy_old == both.energy_new
+        warm = both[~both.cold_old & ~both.cold_new]          # skip the first call (compile/cache load)
+
+        by_solver = both.groupby('solver')
+        summary = pd.DataFrame({
+            'identical'   : by_solver.same_energy.sum().astype(str) + '/' + by_solver.size().astype(str),
+            'all_same'    : by_solver.same_energy.all(),
+            'energy_old'  : by_solver.energy_old.mean(),
+            'energy_new'  : by_solver.energy_new.mean(),
+            'old_s'       : warm.groupby('solver').wall_s_old.median(),
+            'new_s'       : warm.groupby('solver').wall_s_new.median(),
+        })
+        summary['speedup'] = summary.old_s / summary.new_s
+        return summary.sort_values('speedup', ascending=False)
+
+    def plot_speedup(summary, title):
+        INK, INK_2, MUTED, GRID, AXIS, BAR, SURFACE = (
+            '#0b0b0b', '#52514e', '#898781', '#e1e0d9', '#c3c2b7', '#2a78d6', '#fcfcfb')
+        s = summary.sort_values('speedup')                     # largest ends up on top
+        y = np.arange(len(s))
+
+        fig, ax = plt.subplots(figsize=(7, 0.42 * len(s) + 1.3), facecolor=SURFACE)
+        ax.set_facecolor(SURFACE)
+        ax.barh(y, s.speedup - 1, left=1, height=0.5, color=BAR)   # bars grow from the 1x line
+        ax.axvline(1, color=AXIS, linewidth=1)
+
+        ax.set_xscale('log')
+        lo, hi = min(0.8, s.speedup.min() / 1.3), s.speedup.max() * 2.2
+        ticks = [t for t in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if lo <= t <= hi]
+        ax.set_xlim(lo, hi)
+        ax.set_xticks(ticks, labels=[f'{t:g}×' for t in ticks])
+        ax.minorticks_off()
+        ax.grid(axis='x', color=GRID, linewidth=1)
+        ax.set_axisbelow(True)
+
+        for yi, value in zip(y, s.speedup):
+            ax.annotate(f'{value:.2f}×', (value, yi), xytext=(4 if value >= 1 else -4, 0), textcoords='offset points',
+                        ha='left' if value >= 1 else 'right', va='center', color=INK, fontsize=9)
+
+        names = [name if same else f'{name}  (energies differ)' for name, same in zip(s.index, s.all_same)]
+        ax.set_yticks(y, labels=names)
+        ax.tick_params(axis='y', length=0, colors=INK_2)
+        ax.tick_params(axis='x', length=0, colors=MUTED)
+        for side in ('top', 'right', 'left'):
+            ax.spines[side].set_visible(False)
+        ax.spines['bottom'].set_color(AXIS)
+        ax.set_title(title, loc='left', color=INK, fontsize=11)
+        fig.tight_layout()
+        return fig
+
+    OLD = 'K2000_effort0_baseline_2c2995d.csv'
+    NEW = 'K2000_effort0_baseline_47bb988.csv'      # ← your new file
+
+    _old, _new = load_run(OLD), load_run(NEW)
+    speedup = compare_runs(_old, _new)
+    _same_machine = _old.cpu.iloc[0] == _new.cpu.iloc[0]
+    mo.vstack([
+        mo.md('' if _same_machine else '**Warning:** the runs come from different machines, so the times are not comparable.'),
+        speedup,
+        plot_speedup(speedup, f"Speedup of '{_new.label.iloc[0]}' over '{_old.label.iloc[0]}' "
+                              f"(median wall time, {_old.benchmark.iloc[0]})"),
+    ])
     return
 
 
