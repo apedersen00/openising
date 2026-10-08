@@ -29,10 +29,14 @@ def _():
     import pathlib
     import numba
     from argparse import Namespace
+    import cProfile
+    import pstats
+    import io
 
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
+    from line_profiler import LineProfiler
 
     from ising import api
     from ising.stages import TOP
@@ -40,14 +44,21 @@ def _():
     from ising.utils.flow import parse_hyperparameters
     from ising.stages.simulation_stage import SimulationStage
     from ising.stages.initialization_stage import InitializationStage
+    from ising.solvers.Multiplicative import Multiplicative
+    from ising.solvers.Hierarchical_solver import HierarchicalSolver
 
     return (
+        HierarchicalSolver,
         InitializationStage,
+        LineProfiler,
         MaxcutParserStage,
+        Multiplicative,
         Namespace,
         SimulationStage,
         TOP,
+        cProfile,
         datetime,
+        io,
         np,
         numba,
         os,
@@ -55,6 +66,7 @@ def _():
         pathlib,
         pd,
         platform,
+        pstats,
         subprocess,
         time,
         yaml,
@@ -230,6 +242,98 @@ def _(
         return out
 
     save_results(results, configs, 'baseline', BENCHMARK, EFFORT)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Profiling
+    """)
+    return
+
+
+@app.cell
+def _(
+    InitializationStage,
+    SimulationStage,
+    cProfile,
+    configs,
+    io,
+    model,
+    parse_hyperparameters,
+    pstats,
+):
+    def call_solver(solver, configs, model, trial=0):
+        cfg   = configs[solver]
+        hp    = parse_hyperparameters(cfg, model) | {'seed': trial + int(cfg.seed)}
+        stage = SimulationStage([], config=cfg, ising_model=model)
+        s0, _ = InitializationStage([], trail_id=trial, config=cfg, ising_model=model).run()
+        return lambda: stage.run_solver(solver, s0, model, None, stop_criterion_it=False, **hp)
+
+    def profile_func(call, n=20):
+        profiler = cProfile.Profile()
+        profiler.runcall(call)
+        out = io.StringIO()
+        stats = pstats.Stats(profiler, stream=out)
+        stats.sort_stats('cumulative').print_stats('ising/', n)
+        stats.sort_stats('tottime').print_stats(n)
+        return out.getvalue()
+
+    print(profile_func(call_solver('Hierarchical_solver', configs, model)))
+    return (call_solver,)
+
+
+@app.cell
+def _(
+    HierarchicalSolver,
+    LineProfiler,
+    Multiplicative,
+    call_solver,
+    configs,
+    io,
+    model,
+):
+    def profile_lines(call, *functions):
+        lp = LineProfiler(*functions)
+        lp.runcall(call)
+        out = io.StringIO()
+        lp.print_stats(stream=out, output_unit=1e-3, stripzeros=True)
+        return out.getvalue()
+
+    print(profile_lines(call_solver('Hierarchical_solver', configs, model),
+                        Multiplicative.inner_loop_FE, HierarchicalSolver.make_hierarchy))
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Profile Results
+
+    ### Hierarchical
+
+    #### `Multiplicative.py`: 65.3% of time spent in np.block (line 154)
+
+    np.block is replaced with:
+
+    ```python
+    # The below implementation replaces:
+    # previous_states = np.block([[np.sign(new_state)], [previous_states]])[:-1, :]
+    # np.block is slow as it copies and creates a new matrix. Instead we modify the same matrix
+    # sliding the states and setting the first entry to the newest state
+    previous_states[1:] = previous_states[:-1]
+    previous_states[0] = np.sign(new_state)
+    ```
+
+    The new slowest are then:
+
+    - `np.clip(np.sign(new_state)) != np.sign(state))`: 28.8% of the time (line 146)
+    - `np.clip(state + self.dt * dv, -1, 1)`: 28.1% of the time (line 144)
+
+
+    #### `HierarchicalSolver.py`: 97.4% of time spent in upper_J[i, j] loop (line 243)
+    """)
     return
 
 
