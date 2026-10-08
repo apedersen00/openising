@@ -2,12 +2,80 @@ import numpy as np
 import pathlib
 import time
 
+from numba import njit
+
 # from ising.stages import LOGGER
 from ising.solvers.base import SolverBase
 from ising.stages.model.ising import IsingModel
 from ising.utils.HDF5Logger import HDF5Logger
 from ising.utils.numpy import triu_to_symm
 
+@njit(cache=True)
+def _inner_loop_FE_numba(
+        coupling,
+        state,
+        dv,
+        dt,
+        dv_scale,
+        freeze_nodes,
+        bias,
+        num_iterations,
+        stop_criterion,
+        tau_system,
+        ops_per_tau
+    ):
+    # set up the simulation
+    i = 0
+    max_change = np.inf
+
+    # Set up new voltages
+    n = state.shape[0]
+    state = state.copy()
+    new_state = state.copy()
+
+    # States needed for delay calculation. The newest state is always appended to the end of the list.
+    prev_sign = np.sign(state)
+    counter = 1
+    time_zero = 0.0
+    nb_operations = 0
+
+    while i < num_iterations and max_change > stop_criterion:
+        if counter < 1:
+            dv = coupling @ np.sign
+            dv *= dv_scale
+            counter += 1
+            if bias:
+                dv[-1] = 0.0
+
+        dv[self.freeze_nodes] = 0.0
+        new_state = np.clip(state + self.dt * dv, -1, 1)
+
+        if np.max(np.sign(new_state) != np.sign(state)):
+            counter = 0
+
+        if i > 0 and (i % 10) == 0:
+            diff = np.abs(new_state - previous_states[-1])
+            norm_prev = np.linalg.norm(previous_states[-1])
+            max_change = np.max(diff) / (norm_prev if norm_prev != 0 else 1)
+
+        # The below implementation replaces:
+        # previous_states = np.block([[np.sign(new_state)], [previous_states]])[:-1, :]
+        # np.block is slow as it copies and creates a new matrix. Instead we modify the same matrix
+        # sliding the states and setting the first entry to the newest state
+        previous_states[1:] = previous_states[:-1]
+        previous_states[0] = np.sign(new_state)
+
+        state = new_state.copy()
+        i += 1
+        if i * self.dt - time_zero >= self.tau_system:
+            time_zero = i * self.dt
+            nb_operations += 2 * model.num_variables**2 + 3 * model.num_variables
+    return (
+        np.where(new_state[: model.num_variables] >= 0, 1, -1).astype(np.float32),
+        model.evaluate(np.where(new_state[: model.num_variables] >= 0, 1, -1).astype(np.float32)),
+        i * self.dt,
+        nb_operations,
+    )
 
 class Multiplicative(SolverBase):
     def __init__(self, adjustments=False):
