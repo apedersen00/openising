@@ -94,6 +94,14 @@ def _(N, W, np):
     return J, cut_value, energy, h
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Brute force all possible solutions
+    """)
+    return
+
+
 @app.cell
 def _(J, N, cut_value, edges, energy, h, np, pd):
     # There are 5 spins for a total of 2^5 possible combinations
@@ -114,6 +122,7 @@ def _(J, N, cut_value, edges, energy, h, np, pd):
     for _i in range(2**N):
         possible_energies[_i] = energy(possible_states[_i, :], J, h)
 
+    # Compute cut value for every single possible combination
     possible_cuts = np.zeros((2**N, 1))
     for _i in range(2**N):
         possible_cuts[_i] = cut_value(possible_states[_i, :], edges)
@@ -123,6 +132,30 @@ def _(J, N, cut_value, edges, energy, h, np, pd):
         "energy": possible_energies[:, 0],
         "cut": possible_cuts[:, 0],
     })
+    return (possible_states,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Local Field (gradient)
+    """)
+    return
+
+
+@app.cell
+def _(J, N, h, np, possible_states):
+    def field(J, s, h):
+        """
+        Returns the local field that pushes on a node i.e. the gradient.
+        """
+        return J @ s + h
+
+    local_min = np.zeros(2**N, dtype=bool)
+    for _row in range(2**N):
+        _s = possible_states[_row]
+        grad = field(J, _s, h)
+        print(grad)
     return
 
 
