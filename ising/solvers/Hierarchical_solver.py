@@ -224,18 +224,19 @@ class HierarchicalSolver(SolverBase):
         """
         part_ids = np.unique(partitioning)
         num_upper_nodes = int(np.count_nonzero(partitioning == part_ids[0])) if nb_meta_nodes is None else nb_meta_nodes
-        upper_nodes_part, remainder = divmod(num_upper_nodes, len(part_ids))
-        if upper_nodes_part < 1:
+        if num_upper_nodes < len(part_ids):
             raise ValueError("Each subproblem needs at least one upper node")
+        if num_upper_nodes > original_model.num_variables:
+            raise ValueError("More upper nodes requested than local nodes")
+        # Local nodes per upper node: a partition whose size is not a multiple gets smaller upper nodes.
+        nodes_per_upper = original_model.num_variables // num_upper_nodes
 
         subproblems = {}
         original_to_upper = np.empty(original_model.num_variables, dtype=int)
         upper_index = 0
         for part_id in part_ids:
             original_ids = np.flatnonzero(partitioning == part_id)
-            group_count = upper_nodes_part + int(remainder > 0)
-            if group_count > len(original_ids):
-                raise ValueError("More upper nodes requested than local nodes")
+            group_count = -(-len(original_ids) // nodes_per_upper)
             lower_model = IsingModel(
                 np.triu(original_model.J[np.ix_(original_ids, original_ids)], k=1),
                 original_model.h[original_ids],
@@ -248,27 +249,16 @@ class HierarchicalSolver(SolverBase):
             subproblems[part_id] = Subproblem(lower_model, original_ids, upper_nodes)
             original_to_upper[original_ids] = upper_nodes
             upper_index += group_count
-            remainder -= 1
+        num_upper_nodes = upper_index
 
         original_coupling = triu_to_symm(original_model.J)
         upper_members = [np.flatnonzero(original_to_upper == i) for i in range(num_upper_nodes)]
         upper_J = np.zeros((num_upper_nodes, num_upper_nodes))
         upper_h = np.zeros(num_upper_nodes)
-
-        # Upper h is just the mean of the biases of the nodes in that meta node
         for i, members_i in enumerate(upper_members):
             upper_h[i] = original_model.h[members_i].mean()
-
-        pairs_by_shape = defaultdict(list)
-        for i in range(num_upper_nodes):
             for j in range(i + 1, num_upper_nodes):
-                pairs_by_shape[len(upper_members[i]), len(upper_members[j])].append((i, j))
-
-        for pairs in pairs_by_shape.values():
-            i, j = np.array(pairs).T
-            rows = np.array([upper_members[k] for k in i])
-            cols = np.array([upper_members[k] for k in j])
-            upper_J[i, j] = original_coupling[rows[:, :, None], cols[:, None, :]].mean(axis=(1, 2))
+                upper_J[i, j] = original_coupling[np.ix_(members_i, upper_members[j])].mean()
 
         self.original_model = original_model
         self.original_coupling = original_coupling

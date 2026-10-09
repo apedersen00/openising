@@ -761,7 +761,7 @@ x       [V is the cartesian product of V1 and V2, i.e., is the set of\n\
 	n_edges = rn_edges;
 	if (rn_edges - n_edges >= 0.5)
 	  n_edges++;
-	g[++stack] = random_graph(size, n_edges, 0, 0, 0, NULL, NULL, 1, 1, seed);
+	g[++stack] = random_graph(size, n_edges, 0L, 0L, 0L, NULL, NULL, 1L, 1L, seed);
 	if (g[stack] == NULL)
 	  goto panic;
       }

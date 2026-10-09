@@ -1,0 +1,74 @@
+# rudy arguments that reproduce each Gset graph, one per line: <name>|<rudy arguments>
+# Recovered by matching rudy's output against the edge lists in the parent folder.
+G1|-rnd_graph 800 6 8001
+G2|-rnd_graph 800 6 8002
+G3|-rnd_graph 800 6 8003
+G4|-rnd_graph 800 6 8004
+G5|-rnd_graph 800 6 8005
+G6|-rnd_graph 800 6 8001 -random 0 1 8001 -times 2 -plus -1
+G7|-rnd_graph 800 6 8002 -random 0 1 8002 -times 2 -plus -1
+G8|-rnd_graph 800 6 8003 -random 0 1 8003 -times 2 -plus -1
+G9|-rnd_graph 800 6 8004 -random 0 1 8004 -times 2 -plus -1
+G10|-rnd_graph 800 6 8005 -random 0 1 8005 -times 2 -plus -1
+G11|-toroidal_grid_2D 100 8 -random 0 1 8001 -times 2 -plus -1
+G12|-toroidal_grid_2D 50 16 -random 0 1 8002 -times 2 -plus -1
+G13|-toroidal_grid_2D 25 32 -random 0 1 8003 -times 2 -plus -1
+G14|-planar 800 99 8001 -planar 800 99 8002 +
+G15|-planar 800 99 8003 -planar 800 99 8004 +
+G16|-planar 800 99 8005 -planar 800 99 8006 +
+G17|-planar 800 99 8007 -planar 800 99 8008 +
+G18|-planar 800 99 8001 -planar 800 99 8002 + -random 0 1 8001 -times 2 -plus -1
+G19|-planar 800 99 8003 -planar 800 99 8004 + -random 0 1 8002 -times 2 -plus -1
+G20|-planar 800 99 8005 -planar 800 99 8006 + -random 0 1 8003 -times 2 -plus -1
+G21|-planar 800 99 8007 -planar 800 99 8008 + -random 0 1 8004 -times 2 -plus -1
+G22|-rnd_graph 2000 1 20001
+G23|-rnd_graph 2000 1 20002
+G24|-rnd_graph 2000 1 20003
+G25|-rnd_graph 2000 1 20004
+G26|-rnd_graph 2000 1 20005
+G27|-rnd_graph 2000 1 20001 -random 0 1 20001 -times 2 -plus -1
+G28|-rnd_graph 2000 1 20002 -random 0 1 20002 -times 2 -plus -1
+G29|-rnd_graph 2000 1 20003 -random 0 1 20003 -times 2 -plus -1
+G30|-rnd_graph 2000 1 20004 -random 0 1 20004 -times 2 -plus -1
+G31|-rnd_graph 2000 1 20005 -random 0 1 20005 -times 2 -plus -1
+G32|-toroidal_grid_2D 100 20 -random 0 1 20003 -times 2 -plus -1
+G33|-toroidal_grid_2D 80 25 -random 0 1 20002 -times 2 -plus -1
+G34|-toroidal_grid_2D 50 40 -random 0 1 20001 -times 2 -plus -1
+G35|-planar 2000 99 20001 -planar 2000 99 20002 +
+G36|-planar 2000 99 20003 -planar 2000 99 20004 +
+G37|-planar 2000 99 20005 -planar 2000 99 20006 +
+G38|-planar 2000 99 20007 -planar 2000 99 20008 +
+G39|-planar 2000 99 20001 -planar 2000 99 20002 + -random 0 1 20001 -times 2 -plus -1
+G40|-planar 2000 99 20003 -planar 2000 99 20004 + -random 0 1 20002 -times 2 -plus -1
+G41|-planar 2000 99 20005 -planar 2000 99 20006 + -random 0 1 20003 -times 2 -plus -1
+G42|-planar 2000 99 20007 -planar 2000 99 20008 + -random 0 1 20004 -times 2 -plus -1
+G43|-rnd_graph 1000 2 10001
+G44|-rnd_graph 1000 2 10002
+G45|-rnd_graph 1000 2 10003
+G46|-rnd_graph 1000 2 10004
+G47|-rnd_graph 1000 2 10005
+G48|-toroidal_grid_2D 50 60
+G49|-toroidal_grid_2D 30 100
+G50|-toroidal_grid_2D 25 120
+G51|-planar 1000 100 10001 -planar 1000 100 10002 +
+G52|-planar 1000 100 10003 -planar 1000 100 10004 +
+G53|-planar 1000 100 10005 -planar 1000 100 10006 +
+G54|-planar 1000 100 10007 -planar 1000 100 10008 +
+G55|-rnd_graph 5000 0.1 50001
+G56|-rnd_graph 5000 0.1 50001 -random 0 1 50001 -times 2 -plus -1
+G57|-toroidal_grid_2D 100 50 -random 0 1 50001 -times 2 -plus -1
+G58|-planar 5000 99 50001 -planar 5000 99 50002 +
+G59|-planar 5000 99 50001 -planar 5000 99 50002 + -random 0 1 50001 -times 2 -plus -1
+G60|-rnd_graph 7000 0.07 70001
+G61|-rnd_graph 7000 0.07 70001 -random 0 1 70001 -times 2 -plus -1
+G62|-toroidal_grid_2D 100 70 -random 0 1 50001 -times 2 -plus -1
+G63|-planar 7000 99 70001 -planar 7000 99 70002 +
+G64|-planar 7000 99 70001 -planar 7000 99 70002 + -random 0 1 70001 -times 2 -plus -1
+G65|-toroidal_grid_2D 100 80 -random 0 1 80001 -times 2 -plus -1
+G66|-toroidal_grid_2D 90 100 -random 0 1 90001 -times 2 -plus -1
+G67|-toroidal_grid_2D 100 100 -random 0 1 100001 -times 2 -plus -1
+G70|-rnd_graph 10000 0.02 100001
+G72|-toroidal_grid_2D 100 100 -random 0 1 10001 -times 2 -plus -1
+G77|-toroidal_grid_2D 140 100 -random 0 1 140001 -times 2 -plus -1
+G81|-toroidal_grid_2D 200 100 -random 0 1 200001 -times 2 -plus -1
+K2000|-clique 2000 -random 0 1 20001 -times 2 -plus -1
