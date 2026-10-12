@@ -84,6 +84,9 @@ def _(N, W, np):
                 tot += _w
         return tot
 
+    def lower_bound(J, h):
+        return -0.5 * np.abs(J).sum() - np.abs(h).sum()
+
     J, h = maxcut_to_ising(W)
     print('J Matrix')
     for _row in range(N):
@@ -91,7 +94,10 @@ def _(N, W, np):
 
     print('\nBias vector (h)')
     print(h)
-    return J, cut_value, energy, h
+
+    print('\nLower bound for H')
+    print(lower_bound(J, h))
+    return J, cut_value, energy, h, lower_bound
 
 
 @app.cell(hide_code=True)
@@ -233,7 +239,7 @@ def _(mo):
 
 
 @app.cell
-def _(J, N, SEED, analog_run, dt, energy, h, np, plt):
+def _(J, N, SEED, analog_run, dt, energy, h, lower_bound, np, plt):
     def cluster_size(it, n_iter, init_size, end_size):
         """
         Linear decay from init_size to end_size over n_iter.
@@ -267,10 +273,13 @@ def _(J, N, SEED, analog_run, dt, energy, h, np, plt):
         J, h, n_iter=3, n_steps=200, dt=dt, init_size=2, end_size=1, seed=SEED
     )
 
+    _lower_bound = lower_bound(J, h)
+
     _fig, _ax = plt.subplots(1, 2, figsize=(12, 4))
 
-    _ax[0].plot(history[:, 0], label='energy of this run')
-    _ax[0].plot(history[:, 1], label='best energy')
+    _ax[0].plot(history[:, 0], label='energy of this run', linewidth=2)
+    _ax[0].plot(history[:, 1], label='best energy', linewidth=2)
+    _ax[0].axhline(_lower_bound, label='lower bound', linewidth=2, color='black', linestyle='--')
     _ax[0].set_xlabel('iteration')
     _ax[0].set_ylabel('energy')
     _ax[0].legend()
@@ -408,6 +417,170 @@ def _(
 
     _traj_hist = _traj_hist.reshape(-1, N)
     for _k in range(N):
+        _ax[1].plot(_traj_hist[:, _k], label=f's{_k}', linewidth=2)
+    _ax[1].set_xlabel('step')
+    _ax[1].set_ylabel('voltage')
+    _ax[1].legend(loc='upper right')
+
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Quadratic Knapsack
+
+    $x_i = 1$ means "item $i$ goes in the knapsack". With $N$ items there are $N$ binary variables. The goal is maximum profit:
+
+    $$
+    \max_{x_i \in \{0, 1\}^N} \sum_{i < j} P_{ij} x_i x_j + \sum_{i=1}^N P_{ii} x_i \hspace{20pt} \text{s.t.} \sum_{i=1}^N w_i x_i \leq C
+    $$
+
+    - $P_{ii}$: the profit of item $i$ on its own. Only counts if the item is taken, $x_i = 1$.
+    - $P_{ij}$: the extra profit for having both item $i$ and $j$. Only counts if both items are packed, $x_i = x_j = 1$.
+
+    Each item has a weight $w_i$. To keep the items under the knapsack's capacity:
+    $$
+    \sum_{i=1}^N w_i x_i \leq C
+    $$
+    Using this in the same kind of penalty as the [[Traveling salesman problem|TSP]], $(\sum_i w_i x_i - C)^2$, ==would also penalize being under capacity==. The fix is to introduce the unused capacity:
+    $$
+    y = C - \sum_i w_i x_i
+    $$
+    The inequality then becomes an equality:
+    $$
+    \sum_i w_i x_i + y = C, \hspace{20pt} y \geq 0
+    $$
+
+    The slack is binarized as
+    $$
+    y = \sum_{k=0}^{B-1} 2^k y_k, \hspace{20pt} B = \lfloor \log_2 (C) + 1 \rfloor
+    $$
+
+    The expression in matrix form:
+
+    $$
+    \max_{x_i \in \{0, 1\}^N} x^T P x + Px
+    $$
+
+    The Q is then built:
+
+    - $b \cdot x_i$ -> $Q_{ii} = b$ on the diagonal
+    - $c \cdot x_i x_j$ counted once (i < j) -> $c/2$ in $Q_{ij}$ and $c/2$ in $Q_{ji}$
+    """)
+    return
+
+
+@app.cell
+def _(np):
+    def knapsack_to_qubo(w, P, C):
+        n_items = len(w)                                            # Number of items
+        B = int(np.floor(np.log2(C)) + 1)                           # Number of slack bits
+        a = np.concatenate([w, 2.0 ** np.arange(B)])                # Slack bit vector e.g. [1, 2, 4, 8] appended to w
+                                                                    # sum(w_i, x_i) + y = C -> sum(a_i, x_i) = C
+        n = len(a)
+        Q_obj = np.zeros((n, n))                                    # Define Q, we want x^T Q x = -profit for minimization
+        Q_obj[:n_items, :n_items] = -P / 2                          # Half all values
+        np.fill_diagonal(Q_obj[:n_items, :n_items], -np.diag(P))    # Put back the original diagonal
+        Q_pen = np.outer(a, a) - 2 * C * np.diag(a)
+        return Q_obj, Q_pen, C**2
+
+    kp_w = np.array([3, 4, 5, 6, 2, 7]) # weights
+    kp_p = np.array([4, 5, 6, 8, 2, 9]) # profits P_ii
+    kp_C = 12                           # capacity
+    kp_pairs = {                        # pair profits P_ij
+        (0, 4): 6,
+        (1, 2): 3,
+        (3, 5): 10
+    }
+
+    kp_P = np.diag(kp_p).astype(float)                              # Put item prices on the diagonal (counted once)
+    for (_i, _j), _v in kp_pairs.items():                           # Fill the matrix with pair prices
+        kp_P[_i, _j] = kp_P[_j, _i] = _v
+
+    kp_Q_obj, kp_Q_pen, kp_c_pen = knapsack_to_qubo(kp_w, kp_P, kp_C)
+    return kp_C, kp_P, kp_Q_obj, kp_Q_pen, kp_c_pen, kp_w
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## QKP Brute Force
+    """)
+    return
+
+
+@app.cell
+def _(kp_C, kp_P, kp_w, np):
+    def qkp_profit(x, P):
+        return x @ np.triu(P) @ x
+
+    def qkp_brute_force(w, P, C):
+        n = len(w)
+        bext_x, best_profit = None, -np.inf
+        for row in range(2**n):
+            x = np.array([int(b) for b in format(row, f'0{n}b')])
+            if w @ x <= C and qkp_profit(x, P) > best_profit:
+                best_x, best_profit = x, qkp_profit(x, P)
+        return best_x, best_profit
+
+    kp_best_x, kp_best_profit = qkp_brute_force(kp_w, kp_P, kp_C)
+    print(f'Best x: {kp_best_x}, Profit: {kp_best_profit}')
+    return kp_best_profit, qkp_profit
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## QKP Solver
+    """)
+    return
+
+
+@app.cell
+def _(
+    SEED,
+    kp_P,
+    kp_Q_obj,
+    kp_Q_pen,
+    kp_best_profit,
+    kp_c_pen,
+    kp_w,
+    multiplicative_solver,
+    np,
+    plt,
+    qkp_profit,
+    qubo_to_ising,
+):
+    kp_lam = 10.0
+    kp_J, kp_h, kp_c = qubo_to_ising(kp_Q_obj + kp_lam * kp_Q_pen)
+    kp_c = kp_c + kp_lam * kp_c_pen
+
+    def max_field(J, h):
+        return np.max(np.abs(J).sum(axis=1) + np.abs(h))
+
+    _dt = 1 / max_field(kp_J, kp_h)
+
+    _best_sigma, _best_E, _history, _traj_hist = multiplicative_solver(
+        kp_J, kp_h, n_iter=50, n_steps=200, dt=_dt, init_size=3, end_size=1, seed=SEED
+    )
+
+    _n = len(kp_h)
+    _z = (1 + _best_sigma) / 2
+    _x, _y = _z[:len(kp_w)], _z[len(kp_w):]
+    print(f"items {_x.astype(int)}, profit {qkp_profit(_x, kp_P):.0f} (optimum {kp_best_profit:.0f})")
+
+    _fig, _ax = plt.subplots(1, 2, figsize=(12, 4))
+
+    _ax[0].plot(_history[:, 0] + kp_c, label='energy of this run')
+    _ax[0].plot(_history[:, 1] + kp_c, label='best energy')
+    _ax[0].set_xlabel('iteration')
+    _ax[0].set_ylabel('energy')
+    _ax[0].legend()
+
+    _traj_hist = _traj_hist.reshape(-1, _n)
+    for _k in range(_n):
         _ax[1].plot(_traj_hist[:, _k], label=f's{_k}', linewidth=2)
     _ax[1].set_xlabel('step')
     _ax[1].set_ylabel('voltage')
