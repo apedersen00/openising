@@ -186,6 +186,8 @@ def _(mo):
     ## Analog Solvers
 
     Sigmas are continuous voltages. They are updated based on the local field affecting them.
+
+    Below is a "dumb" solver i.e. it settles into the nearest minimum with a gradient of 0.
     """)
     return
 
@@ -214,6 +216,71 @@ def _(J, N, cut_value, edges, field, h, np, plt):
     _ax.set_xlabel('step')
     _ax.set_ylabel('voltage')
     _ax.legend(loc='upper right')
+    _fig
+    return SEED, analog_run, dt, sigma
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Iterative Analog Solver
+
+    1. **Settle:** a single run of a dumb solver
+    2. **Keep the best:** is these $\sigma$ has the lowest energy seen, keep them
+    3. **Kick:** start the next run from the best known start with a random _cluster_ of spins flipped
+    """)
+    return
+
+
+@app.cell
+def _(J, N, SEED, analog_run, dt, energy, h, np, plt, sigma):
+    def cluster_size(it, n_iter, init_size, end_size):
+        """
+        Linear decay from init_size to end_size over n_iter.
+        """
+        steps = np.linspace(init_size, end_size, n_iter)
+        return round(steps[it])
+
+    def multiplicative_solver(J, h, n_iter, n_steps, dt, init_size, end_size, seed):
+        rng = np.random.default_rng(seed)       # Setup RNG
+        n = len(h)                              # Number of spins
+        v = rng.uniform(-1, 1, n)               # Initial voltages for the analog run
+        best_sigma, best_E = None, np.inf       # Store best sigmas and their corresponding energy
+        history = []
+        traj_hist = []
+
+        for it in range(n_iter):
+            traj = analog_run(J, h, v, dt, n_steps)                 # Analog run
+            traj_hist.append(traj)                                  # Store trajectories for plotting
+            sigma = np.sign(traj[-1])                               # Store final sigmas from the analog run
+            E = energy(sigma, J, h)                                 # Compute the energy for this run
+            if E < best_E:                                          # If the new run has better energy, save it
+                best_sigma, best_E = sigma.copy(), E
+            history.append((E, best_E))
+            k = cluster_size(it, n_iter, init_size, end_size)       # Get cluster size i.e. number of spins to flip
+            cluster = rng.choice(n, size=k, replace=False)          # Choose k random spins
+            v = best_sigma.copy()                                   # Copy best sigmas so far
+            v[cluster] *= -1                                        # Flip k random spins
+        return best_sigma, best_E, np.array(history), np.array(traj_hist)
+
+    best_sigma, best_E, history, traj_hist = multiplicative_solver(
+        J, h, n_iter=3, n_steps=200, dt=dt, init_size=2, end_size=1, seed=SEED
+    )
+
+    _fig, _ax = plt.subplots(1, 2, figsize=(12, 4))
+
+    _ax[0].plot(history[:, 0], label='energy of this run')
+    _ax[0].plot(history[:, 1], label='best energy')
+    _ax[0].set_xlabel('iteration')
+    _ax[0].set_ylabel('energy')
+    _ax[0].legend()
+
+    traj_hist = traj_hist.reshape(-1, N)
+    for _k in range(N):
+        _ax[1].plot(traj_hist[:, _k], label=f's{_k} = {sigma[_k]}', linewidth=2)
+    _ax[1].set_xlabel('step')
+    _ax[1].set_ylabel('voltage')
+
     _fig
     return
 
