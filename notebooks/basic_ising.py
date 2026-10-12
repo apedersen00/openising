@@ -217,7 +217,7 @@ def _(J, N, cut_value, edges, field, h, np, plt):
     _ax.set_ylabel('voltage')
     _ax.legend(loc='upper right')
     _fig
-    return SEED, analog_run, dt, sigma
+    return SEED, analog_run, dt
 
 
 @app.cell(hide_code=True)
@@ -233,7 +233,7 @@ def _(mo):
 
 
 @app.cell
-def _(J, N, SEED, analog_run, dt, energy, h, np, plt, sigma):
+def _(J, N, SEED, analog_run, dt, energy, h, np, plt):
     def cluster_size(it, n_iter, init_size, end_size):
         """
         Linear decay from init_size to end_size over n_iter.
@@ -277,9 +277,141 @@ def _(J, N, SEED, analog_run, dt, energy, h, np, plt, sigma):
 
     traj_hist = traj_hist.reshape(-1, N)
     for _k in range(N):
-        _ax[1].plot(traj_hist[:, _k], label=f's{_k} = {sigma[_k]}', linewidth=2)
+        _ax[1].plot(traj_hist[:, _k], label=f's{_k}', linewidth=2)
     _ax[1].set_xlabel('step')
     _ax[1].set_ylabel('voltage')
+    _ax[1].legend(loc='upper right')
+
+    _fig
+    return (multiplicative_solver,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## QUBO
+
+    1. Formulate the COP as a *Quadratic Unconstrained Binary Optimiation* problem:
+
+    $f(\boldsymbol{x}) = \sum_{i,j} a_{ij}x_ix_j + \sum_i b_i x_i + c$
+
+    - $x_i \in \{0, 1\}$: the binary variables
+    - $a_{ij}, b_i, c \in \mathbb{R}$: the weight matrix elements, the weight vector elements and a constant, which is usually dropped
+
+    2. Substitute $\boldsymbol{x} = (1 + \boldsymbol{\sigma})/2$, which turns the QUBO into the Ising Hamiltonian with $J_{ij} = -a_{ij}/2$ and $h_i = -\left(b_i/2 + \sum_j a_{ij}/2\right)$
+
+    ### Max-Cut
+
+    An edge is cut when exactly one end is 1 i.e. when $x_i \oplus x_j = x_i + x_j - 2 x_i x_j = 1$:
+
+    $-cut = \sum_{i<j} w_{ij} (2x_i x_j - x_i - x_j) = x^T W x - \sum_i d_i x_i$
+
+    - $d_i$ = `W.sum(axis=1)` i.e. the weighte degree of node.
+    """)
+    return
+
+
+@app.cell
+def _(J, W, np):
+    def qubo_to_ising(Q):
+        J = -0.5 * Q
+        np.fill_diagonal(J, 0)
+        h = -0.5 * Q.sum(axis=1)
+        c = 0.25 * Q.sum() + 0.25 * np.trace(Q)
+        return J, h, c
+
+    def maxcut_to_qubo(W):
+        return W - np.diag(W.sum(axis=1))
+
+    Q_mc = maxcut_to_qubo(W)
+    J_q, h_q, c_q = qubo_to_ising(Q_mc)
+
+    print("Is the Max-Cut QUBO the same as previously derived?")
+    np.allclose(J_q, J), h_q, c_q
+    return Q_mc, qubo_to_ising
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Penalties
+
+    The solver has no concept of valid or invalid solutions, it just minimizes energy.
+
+    A penalty for "choose exactly one node that can have value $x_i = 1$ for max-cut is defined.
+
+    The penalty:
+
+    $P(x) = (\sum_i x_i - k)^2$
+
+    - Exactly 0 when the constraint is true
+    - Is $\geq 1$ otherwise
+    - Grows larger the further from the valid solution
+    - $k$ is the number of nodes that must have $x_i = 1$
+
+    Expanding:
+
+    $$
+    \begin{align*}
+    P(x) = (\sum x_i - k)^2 &= (\sum x_i)^2 + k^2 - 2k \sum x_i \\
+    &= \sum_i x_i^2 + 2 \sum_{i<j} x_i x_j + k^2 - 2k \sum x_i  \\
+    &= \sum_i x_i + 2 \sum_{i<j} x_i x_j + k^2 - 2k \sum x_i    \\
+    &= 2\sum_{i<j} x_i x_j + (1 - 2k) \sum_i x_i + k^2
+    \end{align*}
+    $$
+
+    The penalty is of the form: $\text{number} \cdot x_i x_j + \text{number} \cdot x_i + \text{constant}$
+    """)
+    return
+
+
+@app.cell
+def _(
+    N,
+    Q_mc,
+    SEED,
+    cut_value,
+    dt,
+    edges,
+    multiplicative_solver,
+    np,
+    plt,
+    qubo_to_ising,
+):
+    k_target = 1
+    Q_pen = np.ones((N, N)) - 2 * k_target * np.eye(N)  # Q_ij = 1, Q_ii = 1 - 2k
+
+    J_pen, h_pen, c_pen = qubo_to_ising(Q_pen)
+    c_pen = c_pen + k_target**2                         # Add k^2 to c
+
+    lam = 3.0 # Penalty weight
+
+    J_pq, h_pq, c_pq = qubo_to_ising(Q_mc + lam * Q_pen)
+    c_pq = c_pq + lam * k_target ** 2
+
+    # Run solver
+    _best_sigma, _best_E, _history, _traj_hist = multiplicative_solver(
+        J_pq, h_pq, n_iter=10, n_steps=200, dt=dt, init_size=2, end_size=1, seed=SEED
+    )
+
+    _x = (1 + _best_sigma) / 2
+    print(f"x = {_x.astype(int)}, ones = {_x.sum():.0f} (target {k_target}), "
+          f"cut = {cut_value(_best_sigma, edges)}, H = {_best_E + c_pq}")
+
+    _fig, _ax = plt.subplots(1, 2, figsize=(12, 4))
+
+    _ax[0].plot(_history[:, 0] + c_pq, label='energy of this run')
+    _ax[0].plot(_history[:, 1] + c_pq, label='best energy')
+    _ax[0].set_xlabel('iteration')
+    _ax[0].set_ylabel('energy')
+    _ax[0].legend()
+
+    _traj_hist = _traj_hist.reshape(-1, N)
+    for _k in range(N):
+        _ax[1].plot(_traj_hist[:, _k], label=f's{_k}', linewidth=2)
+    _ax[1].set_xlabel('step')
+    _ax[1].set_ylabel('voltage')
+    _ax[1].legend(loc='upper right')
 
     _fig
     return
