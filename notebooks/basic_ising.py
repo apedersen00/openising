@@ -6,11 +6,14 @@ app = marimo.App()
 
 @app.cell
 def _():
+    from pathlib import Path
+
     import numpy as np
     import matplotlib.pyplot as plt
     import pandas as pd
+    from numba import njit
 
-    return np, pd, plt
+    return Path, njit, np, pd, plt
 
 
 @app.cell(hide_code=True)
@@ -290,9 +293,10 @@ def _(J, N, SEED, analog_run, dt, energy, h, lower_bound, np, plt):
     _ax[1].set_xlabel('step')
     _ax[1].set_ylabel('voltage')
     _ax[1].legend(loc='upper right')
+    _fig.suptitle('5-node Max-Cut')
 
     _fig
-    return (multiplicative_solver,)
+    return cluster_size, multiplicative_solver
 
 
 @app.cell(hide_code=True)
@@ -500,7 +504,7 @@ def _(np):
         kp_P[_i, _j] = kp_P[_j, _i] = _v
 
     kp_Q_obj, kp_Q_pen, kp_c_pen = knapsack_to_qubo(kp_w, kp_P, kp_C)
-    return kp_C, kp_P, kp_Q_obj, kp_Q_pen, kp_c_pen, kp_w
+    return knapsack_to_qubo, kp_C, kp_P, kp_Q_obj, kp_Q_pen, kp_c_pen, kp_w
 
 
 @app.cell(hide_code=True)
@@ -585,6 +589,144 @@ def _(
     _ax[1].set_xlabel('step')
     _ax[1].set_ylabel('voltage')
     _ax[1].legend(loc='upper right')
+
+    _ax[0].set_xlim(0, 5)
+    _ax[1].set_xlim(0, 1000)
+
+    _fig
+    return (max_field,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Fast Solver
+
+    This is AI-generated for now but gives the exact same results on below problem. Be somewhat careful.
+    """)
+    return
+
+
+@app.cell
+def _(cluster_size, njit, np):
+    @njit
+    def analog_fast(J, h, v, dt, n_steps):
+        n = len(h)
+        s = np.sign(v)
+        f = J @ s + h                                   # full field, once per run
+        v_new = np.empty(n)
+        for _ in range(n_steps):
+            moved = False
+            for i in range(n):                          # 1) every spin moves with the field of the old signs
+                v_new[i] = min(1.0, max(-1.0, v[i] + dt * f[i]))
+                if v_new[i] != v[i]:
+                    moved = True
+            if not moved:                               # nothing moved: the state is stationary forever
+                break
+            for i in range(n):                          # 2) only spins whose sign changed update the field
+                v[i] = v_new[i]
+                s_new = np.sign(v[i])
+                if s_new != s[i]:
+                    d = s_new - s[i]
+                    for j in range(n):
+                        f[j] += J[i, j] * d             # J symmetric: row i = column i, and rows are contiguous
+                    s[i] = s_new
+        return v
+
+    @njit
+    def solver_fast(J, h, v, n_iter, n_steps, dt, sizes, clusters):
+        history = np.empty((n_iter, 2))
+        best_sigma = np.zeros(len(h))
+        best_E = np.inf
+        for it in range(n_iter):
+            sigma = np.sign(analog_fast(J, h, v, dt, n_steps))
+            E = -0.5 * sigma @ J @ sigma - h @ sigma
+            if E < best_E:
+                best_sigma, best_E = sigma.copy(), E
+            history[it, 0] = E
+            history[it, 1] = best_E
+            v = best_sigma.copy()
+            for c in clusters[it, :sizes[it]]:
+                v[c] *= -1
+        return best_sigma, best_E, history
+
+    def multiplicative_fast(J, h, n_iter, n_steps, dt, init_size, end_size, seed):
+        rng = np.random.default_rng(seed)
+        n = len(h)
+        v = rng.uniform(-1, 1, n)
+        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
+        clusters = np.zeros((n_iter, n), dtype=np.int64)
+        for it in range(n_iter):
+            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)   # same draws, same order as multiplicative_solver
+        return solver_fast(J, h, v, n_iter, n_steps, dt, sizes, clusters)
+
+    return (multiplicative_fast,)
+
+
+@app.cell
+def _(
+    Path,
+    SEED,
+    knapsack_to_qubo,
+    max_field,
+    multiplicative_fast,
+    np,
+    plt,
+    qkp_profit,
+    qubo_to_ising,
+):
+    BENCH = Path(__file__).parent.parent / 'ising/benchmarks/Knapsack'
+
+    def load_qkp(name):
+        lines = (BENCH / f'{name}.txt').read_text().splitlines()
+        n = int(lines[1])
+        P = np.diag(np.array(lines[2].split(), dtype=float))
+        for i in range(n - 1):
+            row = np.array(lines[3 + i].split(), dtype=float)
+            P[i, i+1:] = row
+            P[i+1:, i] = row
+        C = int(lines[n + 4])
+        w = np.array(lines[n + 5].split(), dtype=float)
+        return w, P, C
+
+    def load_optimum(name):
+        for line in (BENCH / 'optimal_energy.txt').read_text().splitlines():
+            parts = line.split()
+            if parts and parts[0] == name:
+                return float(parts[1])
+
+
+    bm_name = "jeu_100_25_1"
+    bm_w, bm_P, bm_C = load_qkp(bm_name)
+    bm_best = load_optimum(bm_name)
+
+    bm_Q_obj, bm_Q_pen, bm_c_pen = knapsack_to_qubo(bm_w, bm_P, bm_C)
+    bm_lam = bm_P.max()
+    bm_J, bm_h, bm_c = qubo_to_ising(bm_Q_obj + bm_lam * bm_Q_pen)
+    bm_c = bm_c + bm_lam * bm_c_pen
+
+    _dt = 1 / max_field(bm_J, bm_h)
+
+    N_STEPS = 1000000
+
+    _best_sigma, _best_E, _history = multiplicative_fast(
+        bm_J, bm_h, n_iter=50, n_steps=N_STEPS, dt=_dt, init_size=20, end_size=1, seed=SEED
+    )
+
+    _z = (1 + _best_sigma) / 2
+    _x = _z[:len(bm_w)]
+    _a = np.concatenate([bm_w, 2.0 ** np.arange(len(_z) - len(bm_w))])
+    print(f"weight {bm_w @ _x:.0f}/{bm_C}, feasible {bm_w @ _x <= bm_C}, "
+          f"profit {qkp_profit(_x, bm_P):.0f} / {bm_best:.0f}, gap {1 - qkp_profit(_x, bm_P) / bm_best:.1%}")
+
+    _fig, _ax = plt.subplots()
+
+    _ax.plot(_history[:, 0] + bm_c, label='energy of this run')
+    _ax.plot(_history[:, 1] + bm_c, label='best energy')
+    _ax.set_xlabel('iteration')
+    _ax.set_ylabel('energy')
+    _ax.legend()
+    _ax.set_title(f'QKP: {bm_name}, dt: {_dt:.2e}, n_steps: {N_STEPS}')
 
     _fig
     return
