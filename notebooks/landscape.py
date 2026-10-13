@@ -14,7 +14,15 @@ def _():
     from numba import njit
     import marimo as mo
 
-    return Path, njit, np, plt
+    return Path, mo, njit, np, pd, plt
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Basic multiplicative solver
+    """)
+    return
 
 
 @app.cell
@@ -98,11 +106,19 @@ def _(cluster_size, njit, np):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
         return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
 
-    return (multiplicative_event,)
+    return analog_event, multiplicative_event, solver_event
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Helper functions
+    """)
+    return
 
 
 @app.cell
-def _(Path, np):
+def _(Path, np, solver_event):
     BENCH = Path(__file__).parent.parent / 'ising/benchmarks/Knapsack'
 
     def load_qkp(name):
@@ -151,19 +167,38 @@ def _(Path, np):
         """
         steps = np.linspace(init_size, end_size, n_iter)
         return round(steps[it])
-
+    def multiplicative_event(J, h, n_iter, init_size, end_size, seed, max_events=10**6):
+        rng = np.random.default_rng(seed)
+        n = len(h)
+        v = rng.uniform(-1, 1, n)
+        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
+        clusters = np.zeros((n_iter, n), dtype=np.int64)
+        for it in range(n_iter):
+            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
+        return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
     def qkp_profit(x, P):
         return x @ np.triu(P) @ x
+
+    def energy(s, J, h):
+        return -0.5 * s.T @ J @ s - h @ s
 
     return (
         cluster_size,
         knapsack_to_qubo,
         load_optimum,
         load_qkp,
-        max_field,
+        multiplicative_event,
         qkp_profit,
         qubo_to_ising,
     )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Baseline
+    """)
+    return
 
 
 @app.cell
@@ -171,9 +206,7 @@ def _(
     knapsack_to_qubo,
     load_optimum,
     load_qkp,
-    max_field,
     multiplicative_event,
-    np,
     plt,
     qkp_profit,
     qubo_to_ising,
@@ -189,17 +222,12 @@ def _(
     bm_J, bm_h, bm_c = qubo_to_ising(bm_Q_obj + bm_lam * bm_Q_pen)
     bm_c = bm_c + bm_lam * bm_c_pen
 
-    _dt = 1 / max_field(bm_J, bm_h)
-
-    N_STEPS = 1000000
-
     _best_sigma, _best_E, _history, _states = multiplicative_event(
         bm_J, bm_h, n_iter=50, init_size=20, end_size=1, seed=SEED
     )
 
     _z = (1 + _best_sigma) / 2
     _x = _z[:len(bm_w)]
-    _a = np.concatenate([bm_w, 2.0 ** np.arange(len(_z) - len(bm_w))])
     print(f"weight {bm_w @ _x:.0f}/{bm_C}, feasible {bm_w @ _x <= bm_C}, "
           f"profit {qkp_profit(_x, bm_P):.0f} / {bm_best:.0f}, gap {1 - qkp_profit(_x, bm_P) / bm_best:.1%}")
 
@@ -212,6 +240,147 @@ def _(
     _ax.legend()
     _ax.set_title(f'QKP: {bm_name}')
 
+    _fig
+    return SEED, bm_C, bm_P, bm_Q_obj, bm_Q_pen, bm_best, bm_lam, bm_w
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Solver that can update weights every iteration
+    """)
+    return
+
+
+@app.cell
+def _(analog_event, cluster_size, njit, np):
+    @njit
+    def solver_schedule(J_obj, h_obj, J_pen, h_pen, lambdas, v, sizes, clusters, max_events):
+        n_iter = len(lambdas)
+        states = np.zeros((n_iter, len(h_obj)))             # end state of every run
+        times = np.zeros(n_iter)                            # settle time, largest current scaled to 1
+        inc = np.zeros(len(h_obj))                          # incumbent: the state we kick from
+        for it in range(n_iter):
+            J = J_obj + lambdas[it] * J_pen
+            h = h_obj + lambdas[it] * h_pen
+            sigma, T, _ = analog_event(J, h, v, max_events)
+            states[it] = sigma
+            times[it] = T * np.max(np.abs(J).sum(axis=1) + np.abs(h))
+            if it == 0 or -0.5 * sigma @ J @ sigma - h @ sigma < -0.5 * inc @ J @ inc - h @ inc:   # both under this lam
+                inc = sigma.copy()
+            v = inc.copy()
+            for c in clusters[it, :sizes[it]]:
+                v[c] *= -1
+        return states, times
+
+    def multiplicative_schedule(J_obj, h_obj, J_pen, h_pen, lambdas, init_size, end_size, seed, max_events=10**6):
+        rng = np.random.default_rng(seed)
+        n = len(h_obj)
+        n_iter = len(lambdas)
+        v = rng.uniform(-1, 1, n)
+        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
+        clusters = np.zeros((n_iter, n), dtype=np.int64)
+        for it in range(n_iter):
+            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
+        return solver_schedule(J_obj, h_obj, J_pen, h_pen, lambdas, v, sizes, clusters, max_events)
+
+    return (multiplicative_schedule,)
+
+
+@app.cell
+def _(
+    bm_C,
+    bm_P,
+    bm_Q_obj,
+    bm_Q_pen,
+    bm_best,
+    bm_lam,
+    bm_w,
+    multiplicative_schedule,
+    np,
+    pd,
+    qkp_profit,
+    qubo_to_ising,
+):
+    def evaluate_qkp(states, w, P, C, best):
+        x = (1 + states[:, :len(w)]) / 2
+        fits = x @ w <= C
+        profit = np.array([qkp_profit(xi, P) for xi in x])
+        best_profit = profit[fits].max() if fits.any() else 0.0
+        return 1 - best_profit / best, fits.mean()
+
+    def schedule(shape, lam_start, lam_end, n_iter, ramp_frac=0.7):
+        """Penalty weight of every run: go from lam_start to lam_end over the first ramp_frac of the runs, then hold."""
+        n_ramp = int(ramp_frac * n_iter)
+        p = np.minimum(np.arange(n_iter) / (n_ramp - 1), 1.0)          # progress: 0 → 1 during the ramp, then stays 1
+        if shape == 'constant':
+            return np.full(n_iter, float(lam_end))
+        if shape == 'linear':                                           # same step every run
+            return lam_start + (lam_end - lam_start) * p
+        if shape == 'exponential':                                      # same factor every run
+            return lam_start * (lam_end / lam_start) ** p
+        if shape == 'quadratic':                                        # slow start, fast end
+            return lam_start + (lam_end - lam_start) * p**2
+        if shape == 'step':                                             # lam_start for the whole ramp, then jump
+            return np.where(p < 1, float(lam_start), float(lam_end))
+
+    bm_J_obj, bm_h_obj, _ = qubo_to_ising(bm_Q_obj)             # objective and penalty kept apart
+    bm_J_pen, bm_h_pen, _ = qubo_to_ising(bm_Q_pen)             # so each run can weight the penalty differently
+
+    N_ITER = 50
+    SHAPES = ['constant', 'linear', 'exponential', 'quadratic', 'step']
+    SCHEDULES = {shape: schedule(shape, 1, bm_lam, N_ITER) for shape in SHAPES}
+
+    _rows = []
+    for _name, _lams in SCHEDULES.items():
+        for _seed in range(10):
+            _states, _times = multiplicative_schedule(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, _lams,
+                                                      init_size=10, end_size=1, seed=_seed)
+            _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+            _rows.append(dict(schedule=_name, seed=_seed, gap=_gap, feasible=_feas, settle=np.median(_times)))
+
+    results = pd.DataFrame(_rows)
+    results.groupby('schedule')[['gap', 'feasible', 'settle']].mean()
+    return SCHEDULES, bm_J_obj, bm_J_pen, bm_h_obj, bm_h_pen
+
+
+@app.cell
+def _(
+    SCHEDULES,
+    SEED,
+    bm_C,
+    bm_J_obj,
+    bm_J_pen,
+    bm_P,
+    bm_best,
+    bm_h_obj,
+    bm_h_pen,
+    bm_w,
+    multiplicative_schedule,
+    np,
+    plt,
+    qkp_profit,
+):
+    _lam_lim = (min(l.min() for l in SCHEDULES.values()) / 1.5, max(l.max() for l in SCHEDULES.values()) * 1.5)
+
+    _fig, _ax = plt.subplots(1, len(SCHEDULES), figsize=(20, 4), sharey=True)
+    for _a, (_name, _lams) in zip(_ax, SCHEDULES.items()):
+        _states, _ = multiplicative_schedule(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, _lams,
+                                             init_size=10, end_size=1, seed=SEED)
+        _x = (1 + _states[:, :len(bm_w)]) / 2
+        _fits = _x @ bm_w <= bm_C
+        _profit = np.array([qkp_profit(_xi, bm_P) for _xi in _x])
+        _a.plot(np.where(_fits, _profit, np.nan), 'o', label='items fit')
+        _a.plot(np.where(~_fits, _profit, np.nan), 'x', label='overweight')
+        _a.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a.set_title(_name)
+        _a.set_xlabel('run')
+        _a2 = _a.twinx()
+        _a2.plot(_lams, color='gray', alpha=0.5)
+        _a2.set_ylim(_lam_lim)
+    _a2.set_ylabel('λ')
+    _ax[0].set_ylabel('profit')
+    _ax[0].legend()
     _fig
     return
 
