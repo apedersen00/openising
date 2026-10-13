@@ -12,8 +12,9 @@ def _():
     import matplotlib.pyplot as plt
     import pandas as pd
     from numba import njit
+    import marimo as mo
 
-    return Path, njit, np, pd, plt
+    return Path, mo, njit, np, pd, plt
 
 
 @app.cell(hide_code=True)
@@ -610,57 +611,85 @@ def _(mo):
 @app.cell
 def _(cluster_size, njit, np):
     @njit
-    def analog_fast(J, h, v, dt, n_steps):
-        n = len(h)
-        s = np.sign(v)
-        f = J @ s + h                                   # full field, once per run
-        v_new = np.empty(n)
-        for _ in range(n_steps):
-            moved = False
-            for i in range(n):                          # 1) every spin moves with the field of the old signs
-                v_new[i] = min(1.0, max(-1.0, v[i] + dt * f[i]))
-                if v_new[i] != v[i]:
-                    moved = True
-            if not moved:                               # nothing moved: the state is stationary forever
-                break
-            for i in range(n):                          # 2) only spins whose sign changed update the field
-                v[i] = v_new[i]
-                s_new = np.sign(v[i])
-                if s_new != s[i]:
-                    d = s_new - s[i]
-                    for j in range(n):
-                        f[j] += J[i, j] * d             # J symmetric: row i = column i, and rows are contiguous
-                    s[i] = s_new
-        return v
+    def analog_event(J, h, v, max_events):
+        """
+        Args:
+            - J: coupling
+            - h: biases
+            - v: continuous voltages per spin
+            - max_events: maximum number of flips per run
+        """
+        n = len(h)                                                          # Number of spins
+        s = np.sign(v)                                                      # sign values of spins
+        for i in range(n):                                                  # If a spin is exactly at the threshold, make it +1
+            if s[i] == 0:
+                s[i] = 1.0
+
+        f = J @ s + h                                                       # The local fields
+        t = 0.0                                                             # time since start
+        for event in range(max_events):                                     # iterate till either conergence or max_events
+            t_next = np.inf                                                 # time till next spin crosses the threshold
+            k = -1                                                          # Spin index that has has the next crossing at t_next
+            for i in range(n):                                              # Check every spin
+                if v[i] * f[i] < 0 or (v[i] == 0.0 and s[i] * f[i] < 0):    # Check if a pin moves torwards the threshold (0)
+                    t_i = -v[i] / f[i]                                      # Time till the spin crosses the threshold
+                    if t_i < t_next:                                        # log the spin if it has the earliest crossing time found so far
+                        t_next = t_i
+                        k = i
+
+            if k < 0:                                                       # If no spin heads for the crossing: convergence
+                return s, t, event
+
+            for i in range(n):                                              # Update all spins
+                reached = v[i] * f[i] < 0 and -v[i] / f[i] <= t_next        # Which spins reach the threshold at t_next
+                v[i] = min(1.0, max(-1.0, v[i] + t_next * f[i]))            # Updated the voltages
+                if reached:                                                 # Place the crossing spins at exactly 0
+                    v[i] = 0.0
+
+            d = np.sign(f[k]) - s[k]                                        # change in spin state
+            s[k] = np.sign(f[k])                                            # Update spin signs
+            for j in range(n):                                              # Update the field for every spin
+                f[j] += J[k, j] * d
+            t += t_next
+        return s, t, max_events
 
     @njit
-    def solver_fast(J, h, v, n_iter, n_steps, dt, sizes, clusters):
-        history = np.empty((n_iter, 2))
+    def solver_event(J, h, v, n_iter, sizes, clusters, max_events):
+        """
+        Outer iteration loop for the event solver.
+
+        Run the event solver, update the best state and perturb with a decreasing cluster size.
+        """
+        history = np.empty((n_iter, 3))                     # energy, best energy, settle time
+        states = np.zeros((n_iter, len(h)))                 # end state of every run
         best_sigma = np.zeros(len(h))
         best_E = np.inf
         for it in range(n_iter):
-            sigma = np.sign(analog_fast(J, h, v, dt, n_steps))
+            sigma, T, _ = analog_event(J, h, v, max_events)
+            states[it] = sigma
             E = -0.5 * sigma @ J @ sigma - h @ sigma
             if E < best_E:
                 best_sigma, best_E = sigma.copy(), E
             history[it, 0] = E
             history[it, 1] = best_E
+            history[it, 2] = T
             v = best_sigma.copy()
             for c in clusters[it, :sizes[it]]:
                 v[c] *= -1
-        return best_sigma, best_E, history
+        return best_sigma, best_E, history, states
 
-    def multiplicative_fast(J, h, n_iter, n_steps, dt, init_size, end_size, seed):
+
+    def multiplicative_event(J, h, n_iter, init_size, end_size, seed, max_events=10**6):
         rng = np.random.default_rng(seed)
         n = len(h)
         v = rng.uniform(-1, 1, n)
         sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
         clusters = np.zeros((n_iter, n), dtype=np.int64)
         for it in range(n_iter):
-            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)   # same draws, same order as multiplicative_solver
-        return solver_fast(J, h, v, n_iter, n_steps, dt, sizes, clusters)
+            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
+        return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
 
-    return (multiplicative_fast,)
+    return (multiplicative_event,)
 
 
 @app.cell
@@ -669,7 +698,7 @@ def _(
     SEED,
     knapsack_to_qubo,
     max_field,
-    multiplicative_fast,
+    multiplicative_event,
     np,
     plt,
     qkp_profit,
@@ -709,8 +738,8 @@ def _(
 
     N_STEPS = 1000000
 
-    _best_sigma, _best_E, _history = multiplicative_fast(
-        bm_J, bm_h, n_iter=50, n_steps=N_STEPS, dt=_dt, init_size=20, end_size=1, seed=SEED
+    _best_sigma, _best_E, _history, _states = multiplicative_event(
+        bm_J, bm_h, n_iter=100, init_size=20, end_size=1, seed=SEED
     )
 
     _z = (1 + _best_sigma) / 2
@@ -726,7 +755,7 @@ def _(
     _ax.set_xlabel('iteration')
     _ax.set_ylabel('energy')
     _ax.legend()
-    _ax.set_title(f'QKP: {bm_name}, dt: {_dt:.2e}, n_steps: {N_STEPS}')
+    _ax.set_title(f'QKP: {bm_name}')
 
     _fig
     return
