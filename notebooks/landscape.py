@@ -106,7 +106,7 @@ def _(cluster_size, njit, np):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
         return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
 
-    return analog_event, multiplicative_event, solver_event
+    return analog_event, multiplicative_event
 
 
 @app.cell(hide_code=True)
@@ -118,7 +118,7 @@ def _(mo):
 
 
 @app.cell
-def _(Path, np, solver_event):
+def _(Path, np):
     BENCH = Path(__file__).parent.parent / 'ising/benchmarks/Knapsack'
 
     def load_qkp(name):
@@ -152,7 +152,7 @@ def _(Path, np, solver_event):
         Q_obj[:n_items, :n_items] = -P / 2                          # Half all values
         np.fill_diagonal(Q_obj[:n_items, :n_items], -np.diag(P))    # Put back the original diagonal
         Q_pen = np.outer(a, a) - 2 * C * np.diag(a)
-        return Q_obj, Q_pen, C**2
+        return Q_obj, Q_pen, C**2, a
 
     def qubo_to_ising(Q):
         J = -0.5 * Q
@@ -167,15 +167,7 @@ def _(Path, np, solver_event):
         """
         steps = np.linspace(init_size, end_size, n_iter)
         return round(steps[it])
-    def multiplicative_event(J, h, n_iter, init_size, end_size, seed, max_events=10**6):
-        rng = np.random.default_rng(seed)
-        n = len(h)
-        v = rng.uniform(-1, 1, n)
-        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
-        clusters = np.zeros((n_iter, n), dtype=np.int64)
-        for it in range(n_iter):
-            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
-        return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
+
     def qkp_profit(x, P):
         return x @ np.triu(P) @ x
 
@@ -187,7 +179,6 @@ def _(Path, np, solver_event):
         knapsack_to_qubo,
         load_optimum,
         load_qkp,
-        multiplicative_event,
         qkp_profit,
         qubo_to_ising,
     )
@@ -217,7 +208,7 @@ def _(
     bm_w, bm_P, bm_C = load_qkp(bm_name)
     bm_best = load_optimum(bm_name)
 
-    bm_Q_obj, bm_Q_pen, bm_c_pen = knapsack_to_qubo(bm_w, bm_P, bm_C)
+    bm_Q_obj, bm_Q_pen, bm_c_pen, bm_a = knapsack_to_qubo(bm_w, bm_P, bm_C)
     bm_lam = bm_P.max()
     bm_J, bm_h, bm_c = qubo_to_ising(bm_Q_obj + bm_lam * bm_Q_pen)
     bm_c = bm_c + bm_lam * bm_c_pen
@@ -241,7 +232,7 @@ def _(
     _ax.set_title(f'QKP: {bm_name}')
 
     _fig
-    return SEED, bm_C, bm_P, bm_Q_obj, bm_Q_pen, bm_best, bm_lam, bm_w
+    return SEED, bm_C, bm_P, bm_Q_obj, bm_Q_pen, bm_a, bm_best, bm_lam, bm_w
 
 
 @app.cell(hide_code=True)
@@ -341,7 +332,15 @@ def _(
 
     results = pd.DataFrame(_rows)
     results.groupby('schedule')[['gap', 'feasible', 'settle']].mean()
-    return SCHEDULES, bm_J_obj, bm_J_pen, bm_h_obj, bm_h_pen
+    return (
+        N_ITER,
+        SCHEDULES,
+        bm_J_obj,
+        bm_J_pen,
+        bm_h_obj,
+        bm_h_pen,
+        evaluate_qkp,
+    )
 
 
 @app.cell
@@ -381,6 +380,176 @@ def _(
     _a2.set_ylabel('λ')
     _ax[0].set_ylabel('profit')
     _ax[0].legend()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Lagrange
+
+    Follows the paper: delacour2025selfadaptive
+
+    - $f(x)$ is the cost to minimize. For QKP f = -profit
+    - $g(x)$ is the constraint, satisfied when $g(x) = 0$. For a knapsack its $g = w \cdot x - C$
+    - The penalty if $E = f + P \cdot g^2$. The paper's P is $\lambda$
+
+    The minimum of $E$ is only feasible if $P \geq P_C$, some critical value that depends on the problem. A large $P$ makes $f$ negligible and the landscape difficult.
+
+    Instead of the penalty, Lagrange relaxtion linearly weights constraints by Lagrange multipliers $\lambda$ and adds them to the energy function:
+
+    $L = E(x) + \lambda^T g(x) = -\text{profit} + \lambda (\text{weight} - C)$
+
+    We don't know the right $\lambda$ in advance, so it's updated based on solver output. In continuous time this is:
+
+    $$
+        \tau_\lambda \frac{d\lambda}{dt} = g(\overline{x}) = +\nabla_\lambda LB_L
+    $$
+
+    The algorithm from the paper:
+
+    ```
+    (lambda_0, P) <- (0, adN)
+    for K iterations:
+        minimize L_k:   x_k = argmin_x L_k                      > Ising machine
+        store feasible  x_k                                     > CPU
+        update:         lambda_{k+1} <- lamdda_k + n * g(x_k)   > CPU
+    x <- argmin_k f(x_k)
+    ```
+    """)
+    return
+
+
+@app.cell
+def _(analog_event, cluster_size, njit, np):
+    @njit
+    def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events):
+        """
+        Args:
+            - J_obj, h_obj: f in Ising form
+            - J_pen, h_pen: ||g||^2 in Ising form
+            - a, C: the extended A and b
+            - P, eta: P and n of the algorithm
+            - v, sizes, cluster: multiplicative solver's start voltages and cluster size
+        """
+        n_iter = len(sizes)                                 # the K iterations of the algorithm
+        n = len(h_obj)
+        J = J_obj + P * J_pen                               # Compute the J
+        states = np.zeros((n_iter, n))                      # end state of every run
+        lams = np.zeros(n_iter)                             # lambdas for every run
+        inc = np.zeros(n)                                   # incumbent: the state we perturb on next iteration
+        lam = 0.0                                           # Current lambda (lambda_0 = 0 from algorithm)
+        for it in range(n_iter):                            # Do K iterations
+            h = h_obj + P * h_pen - lam * a / 2             # the price only changes the biases
+            sigma, T, _ = analog_event(J, h, v, max_events)
+            states[it] = sigma
+            lams[it] = lam
+            if it == 0 or -0.5 * sigma @ J @ sigma - h @ sigma < -0.5 * inc @ J @ inc - h @ inc:   # both under this price
+                inc = sigma.copy()
+            lam += eta * (a @ ((1 + sigma) / 2) - C)        # over capacity: raise the price; under: lower it
+            v = inc.copy()
+            for c in clusters[it, :sizes[it]]:
+                v[c] *= -1
+        return states, lams
+
+    def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6):
+        rng = np.random.default_rng(seed)
+        n = len(h_obj)
+        v = rng.uniform(-1, 1, n)
+        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
+        clusters = np.zeros((n_iter, n), dtype=np.int64)
+        for it in range(n_iter):
+            clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
+        return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events)
+
+    return (multiplicative_lagrange,)
+
+
+@app.cell
+def _(
+    N_ITER,
+    bm_C,
+    bm_J_obj,
+    bm_J_pen,
+    bm_P,
+    bm_a,
+    bm_best,
+    bm_h_obj,
+    bm_h_pen,
+    bm_w,
+    evaluate_qkp,
+    multiplicative_lagrange,
+    pd,
+):
+    LAGRANGE = {
+        'P=0.1, η=0.1': dict(P=0.1, eta=0.1),
+        'P=1, η=0.5'  : dict(P=1.0, eta=0.5),
+        'P=1, η=2'    : dict(P=1.0, eta=2.0),
+    }
+
+    _rows = []
+    for _name, _kw in LAGRANGE.items():
+        for _seed in range(10):
+            _states, _lams = multiplicative_lagrange(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, bm_a, bm_C,
+                                                             n_iter=N_ITER, init_size=10, end_size=1, seed=_seed, **_kw)
+            _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+            _rows.append(dict(method=_name, seed=_seed, gap=_gap, feasible=_feas,
+                              final_lam=_lams[-1]))
+
+    lagrange_results = pd.DataFrame(_rows)
+    lagrange_results.groupby('method', sort=False)[['gap', 'feasible', 'final_lam']].mean()
+    return (LAGRANGE,)
+
+
+@app.cell
+def _(
+    LAGRANGE,
+    N_ITER,
+    SEED,
+    bm_C,
+    bm_J_obj,
+    bm_J_pen,
+    bm_P,
+    bm_a,
+    bm_best,
+    bm_h_obj,
+    bm_h_pen,
+    bm_w,
+    multiplicative_lagrange,
+    np,
+    plt,
+    qkp_profit,
+):
+    _runs = {_name: multiplicative_lagrange(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, bm_a, bm_C, n_iter=N_ITER,
+                                            init_size=10, end_size=1, seed=SEED, **_kw)
+            for _name, _kw in LAGRANGE.items()}
+    _lam_max = max(_lams.max() for _, _lams in _runs.values()) * 1.1          # same price axis on every panel
+
+    _fig, _ax = plt.subplots(2, len(LAGRANGE), figsize=(6 * len(LAGRANGE), 7), sharex=True, sharey='row')
+    for _col, (_name, (_states, _lams)) in enumerate(_runs.items()):
+        _x = (1 + _states[:, :len(bm_w)]) / 2
+        _fits = _x @ bm_w <= bm_C
+        _profit = np.array([qkp_profit(_xi, bm_P) for _xi in _x])
+        _over = _x @ bm_w - bm_C                                                  # > 0: overweight
+
+        _a = _ax[0, _col]                                                         # top: profit of every run
+        _a.plot(np.where(_fits, _profit, np.nan), 'o', label='items fit')
+        _a.plot(np.where(~_fits, _profit, np.nan), 'x', label='overweight')
+        _a.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a.set_title(_name)
+
+        _b = _ax[1, _col]                                                         # bottom: over/under capacity and the price
+        _b.bar(range(N_ITER), _over, color=np.where(_over > 0, 'tab:orange', 'tab:blue'))
+        _b.axhline(0, color='black', linewidth=0.8)
+        _b.set_xlabel('run')
+        _b2 = _b.twinx()
+        _b2.step(range(N_ITER), _lams, where='post', color='gray')
+        _b2.set_ylim(0, _lam_max)
+    _b2.set_ylabel('price λ')
+    _ax[0, 0].set_ylabel('profit')
+    _ax[0, 0].legend()
+    _ax[1, 0].set_ylabel('items weight − capacity')
     _fig
     return
 
