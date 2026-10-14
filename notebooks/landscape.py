@@ -1,12 +1,13 @@
 import marimo
 
-__generated_with = "0.24.2"
+__generated_with = "0.25.1"
 app = marimo.App()
 
 
 @app.cell
 def _():
     from pathlib import Path
+    import itertools
 
     import numpy as np
     import matplotlib.pyplot as plt
@@ -14,7 +15,7 @@ def _():
     from numba import njit
     import marimo as mo
 
-    return Path, mo, njit, np, pd, plt
+    return Path, itertools, mo, njit, np, pd, plt
 
 
 @app.cell(hide_code=True)
@@ -170,9 +171,6 @@ def _(Path, np):
 
     def qkp_profit(x, P):
         return x @ np.triu(P) @ x
-
-    def energy(s, J, h):
-        return -0.5 * s.T @ J @ s - h @ s
 
     return (
         cluster_size,
@@ -424,12 +422,20 @@ def _(mo):
 @app.cell
 def _(analog_event, cluster_size, njit, np):
     @njit
+    def energy(s, J, h):
+        return -0.5 * s.T @ J @ s - h @ s
+
+    @njit
+    def qkp_penalty(a, sigma, C):
+        return a.T @ ((1 + sigma) / 2) - C
+
+    @njit
     def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events):
         """
         Args:
             - J_obj, h_obj: f in Ising form
             - J_pen, h_pen: ||g||^2 in Ising form
-            - a, C: the extended A and b
+            - a, C: the extended A and C
             - P, eta: P and n of the algorithm
             - v, sizes, cluster: multiplicative solver's start voltages and cluster size
         """
@@ -438,17 +444,21 @@ def _(analog_event, cluster_size, njit, np):
         J = J_obj + P * J_pen                               # Compute the J
         states = np.zeros((n_iter, n))                      # end state of every run
         lams = np.zeros(n_iter)                             # lambdas for every run
-        inc = np.zeros(n)                                   # incumbent: the state we perturb on next iteration
+        winner = np.zeros(n)                                # winner: the state we perturb on next iteration
         lam = 0.0                                           # Current lambda (lambda_0 = 0 from algorithm)
         for it in range(n_iter):                            # Do K iterations
-            h = h_obj + P * h_pen - lam * a / 2             # the price only changes the biases
-            sigma, T, _ = analog_event(J, h, v, max_events)
+            h = h_obj + P * h_pen - lam * a / 2             # Add the Lagrange term (only affects bias)
+            sigma, T, _ = analog_event(J, h, v, max_events) # Run the typical solver
             states[it] = sigma
             lams[it] = lam
-            if it == 0 or -0.5 * sigma @ J @ sigma - h @ sigma < -0.5 * inc @ J @ inc - h @ inc:   # both under this price
-                inc = sigma.copy()
-            lam += eta * (a @ ((1 + sigma) / 2) - C)        # over capacity: raise the price; under: lower it
-            v = inc.copy()
+
+            if it == 0:
+                winner = sigma.copy()
+            elif energy(sigma, J, h) < energy(winner, J, h):
+                winner = sigma.copy()
+
+            lam += eta * qkp_penalty(a, sigma, C)
+            v = winner.copy()
             for c in clusters[it, :sizes[it]]:
                 v[c] *= -1
         return states, lams
@@ -457,8 +467,8 @@ def _(analog_event, cluster_size, njit, np):
         rng = np.random.default_rng(seed)
         n = len(h_obj)
         v = rng.uniform(-1, 1, n)
-        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])
-        clusters = np.zeros((n_iter, n), dtype=np.int64)
+        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])   # List of cluster sizes e.g. [10, 5, 1]
+        clusters = np.zeros((n_iter, n), dtype=np.int64)                                            # Array of which spins in each cluster
         for it in range(n_iter):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
         return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events)
@@ -468,7 +478,6 @@ def _(analog_event, cluster_size, njit, np):
 
 @app.cell
 def _(
-    N_ITER,
     bm_C,
     bm_J_obj,
     bm_J_pen,
@@ -479,27 +488,56 @@ def _(
     bm_h_pen,
     bm_w,
     evaluate_qkp,
+    itertools,
     multiplicative_lagrange,
     pd,
 ):
-    LAGRANGE = {
-        'P=0.1, η=0.1': dict(P=0.1, eta=0.1),
-        'P=1, η=0.5'  : dict(P=1.0, eta=0.5),
-        'P=1, η=2'    : dict(P=1.0, eta=2.0),
+    # Parameters to sweep. All combinations will be tested
+    RUNS = {
+        'P': [0.1, 0.5, 1.0, 2.0],
+        'n': [0.1, 0.5, 1.0, 2.0]
     }
 
-    _rows = []
-    for _name, _kw in LAGRANGE.items():
-        for _seed in range(10):
-            _states, _lams = multiplicative_lagrange(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, bm_a, bm_C,
-                                                             n_iter=N_ITER, init_size=10, end_size=1, seed=_seed, **_kw)
-            _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
-            _rows.append(dict(method=_name, seed=_seed, gap=_gap, feasible=_feas,
-                              final_lam=_lams[-1]))
+    _N_ITER = 50
+    INIT_SIZE = 1
+    END_SIZE = 1
+    SEEDS = 10
 
-    lagrange_results = pd.DataFrame(_rows)
-    lagrange_results.groupby('method', sort=False)[['gap', 'feasible', 'final_lam']].mean()
-    return (LAGRANGE,)
+    lagrange_results = []
+
+    for _P, _n in itertools.product(RUNS['P'], RUNS['n']):
+      for _seed in range(SEEDS):
+        _states, _lambdas = multiplicative_lagrange(
+            bm_J_obj,
+            bm_h_obj,
+            bm_J_pen,
+            bm_h_pen,
+            bm_a,
+            bm_C,
+            _P,
+            _n,
+            n_iter=_N_ITER,
+            init_size=INIT_SIZE,
+            end_size=END_SIZE,
+            seed=_seed,
+        )
+
+        _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+
+        lagrange_results.append({
+            'P': _P,
+            'n': _n,
+            'seed': _seed,
+            'gap': _gap,
+            'feasible': _feas,
+            'lambda': _lambdas[-1],
+            'lambdas': _lambdas,
+            'states': _states,
+        })
+
+    df = pd.DataFrame(lagrange_results)
+    df
+    return
 
 
 @app.cell
