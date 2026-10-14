@@ -330,15 +330,7 @@ def _(
 
     results = pd.DataFrame(_rows)
     results.groupby('schedule')[['gap', 'feasible', 'settle']].mean()
-    return (
-        N_ITER,
-        SCHEDULES,
-        bm_J_obj,
-        bm_J_pen,
-        bm_h_obj,
-        bm_h_pen,
-        evaluate_qkp,
-    )
+    return SCHEDULES, bm_J_obj, bm_J_pen, bm_h_obj, bm_h_pen, evaluate_qkp
 
 
 @app.cell
@@ -541,53 +533,9 @@ def _(
 
 
 @app.cell
-def _(
-    LAGRANGE,
-    N_ITER,
-    SEED,
-    bm_C,
-    bm_J_obj,
-    bm_J_pen,
-    bm_P,
-    bm_a,
-    bm_best,
-    bm_h_obj,
-    bm_h_pen,
-    bm_w,
-    multiplicative_lagrange,
-    np,
-    plt,
-    qkp_profit,
-):
-    _runs = {_name: multiplicative_lagrange(bm_J_obj, bm_h_obj, bm_J_pen, bm_h_pen, bm_a, bm_C, n_iter=N_ITER,
-                                            init_size=10, end_size=1, seed=SEED, **_kw)
-            for _name, _kw in LAGRANGE.items()}
-    _lam_max = max(_lams.max() for _, _lams in _runs.values()) * 1.1          # same price axis on every panel
+def _(plt):
+    _fig, _ax = plt.subplots(1, 4, figsize=(16, 4))
 
-    _fig, _ax = plt.subplots(2, len(LAGRANGE), figsize=(6 * len(LAGRANGE), 7), sharex=True, sharey='row')
-    for _col, (_name, (_states, _lams)) in enumerate(_runs.items()):
-        _x = (1 + _states[:, :len(bm_w)]) / 2
-        _fits = _x @ bm_w <= bm_C
-        _profit = np.array([qkp_profit(_xi, bm_P) for _xi in _x])
-        _over = _x @ bm_w - bm_C                                                  # > 0: overweight
-
-        _a = _ax[0, _col]                                                         # top: profit of every run
-        _a.plot(np.where(_fits, _profit, np.nan), 'o', label='items fit')
-        _a.plot(np.where(~_fits, _profit, np.nan), 'x', label='overweight')
-        _a.axhline(bm_best, color='black', linestyle='--', label='optimum')
-        _a.set_title(_name)
-
-        _b = _ax[1, _col]                                                         # bottom: over/under capacity and the price
-        _b.bar(range(N_ITER), _over, color=np.where(_over > 0, 'tab:orange', 'tab:blue'))
-        _b.axhline(0, color='black', linewidth=0.8)
-        _b.set_xlabel('run')
-        _b2 = _b.twinx()
-        _b2.step(range(N_ITER), _lams, where='post', color='gray')
-        _b2.set_ylim(0, _lam_max)
-    _b2.set_ylabel('price λ')
-    _ax[0, 0].set_ylabel('profit')
-    _ax[0, 0].legend()
-    _ax[1, 0].set_ylabel('items weight − capacity')
     _fig
     return
 
