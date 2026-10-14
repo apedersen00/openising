@@ -491,41 +491,43 @@ def _(
     }
 
     _N_ITER = 50
-    INIT_SIZE = 1
+    INIT_SIZES = [1, 10, 20, 40, 80]
     END_SIZE = 1
     SEEDS = 10
 
     lagrange_results = []
 
     for _P, _n in itertools.product(RUNS['P'], RUNS['n']):
-      for _seed in range(SEEDS):
-        _states, _lambdas = multiplicative_lagrange(
-            bm_J_obj,
-            bm_h_obj,
-            bm_J_pen,
-            bm_h_pen,
-            bm_a,
-            bm_C,
-            _P,
-            _n,
-            n_iter=_N_ITER,
-            init_size=INIT_SIZE,
-            end_size=END_SIZE,
-            seed=_seed,
-        )
+        for _init_size in INIT_SIZES:
+            for _seed in range(SEEDS):
+                _states, _lambdas = multiplicative_lagrange(
+                    bm_J_obj,
+                    bm_h_obj,
+                    bm_J_pen,
+                    bm_h_pen,
+                    bm_a,
+                    bm_C,
+                    _P,
+                    _n,
+                    n_iter=_N_ITER,
+                    init_size=_init_size,
+                    end_size=END_SIZE,
+                    seed=_seed,
+                )
 
-        _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+                _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
 
-        lagrange_results.append({
-            'P': _P,
-            'n': _n,
-            'seed': _seed,
-            'gap': _gap,
-            'feasible': _feas,
-            'lambda': _lambdas[-1],
-            'lambdas': _lambdas,
-            'states': _states,
-        })
+                lagrange_results.append({
+                    'P': _P,
+                    'n': _n,
+                    'seed': _seed,
+                    'gap': _gap,
+                    'feasible': _feas,
+                    'lambda': _lambdas[-1],
+                    'lambdas': _lambdas,
+                    'states': _states,
+                    'init_size': _init_size,
+                })
 
     df = pd.DataFrame(lagrange_results)
     df
