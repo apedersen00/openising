@@ -470,6 +470,7 @@ def _(analog_event, cluster_size, njit, np):
 
 @app.cell
 def _(
+    Path,
     bm_C,
     bm_J_obj,
     bm_J_pen,
@@ -483,17 +484,18 @@ def _(
     itertools,
     multiplicative_lagrange,
     pd,
+    qkp_profit,
 ):
     # Parameters to sweep. All combinations will be tested
     RUNS = {
-        'P': [0.1, 0.5, 1.0, 2.0],
-        'n': [0.1, 0.5, 1.0, 2.0]
+        'P': [0.05, 0.1, 0.2, 0.5, 1.0],
+        'n': [0.05, 0.1, 0.2, 0.5, 1.0]
     }
 
     _N_ITER = 50
-    INIT_SIZES = [1, 10, 20, 40, 80]
+    INIT_SIZES = [1, 5, 10, 20, 40]
     END_SIZE = 1
-    SEEDS = 10
+    SEEDS = 100
 
     lagrange_results = []
 
@@ -516,28 +518,74 @@ def _(
                 )
 
                 _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+                _z = (1 + _states) / 2  # convert [-1, +1] to [0, 1]
+                _x = _z[:, :len(bm_w)]  # slice off the binary weighted weights
 
-                lagrange_results.append({
+                lagrange_results.append(pd.DataFrame({
                     'P': _P,
                     'n': _n,
+                    'init_size': _init_size,
                     'seed': _seed,
                     'gap': _gap,
                     'feasible': _feas,
-                    'lambda': _lambdas[-1],
-                    'lambdas': _lambdas,
-                    'states': _states,
-                    'init_size': _init_size,
-                })
+                    'lambda': _lambdas,
+                    'profit': [qkp_profit(_xi, bm_P) for _xi in _x],
+                    'weight': _x @ bm_w,
+                    'penalty': _z @ bm_a - bm_C
+                }))
 
-    df = pd.DataFrame(lagrange_results)
-    df
-    return
+    df = pd.concat(lagrange_results, ignore_index=True)
+    df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs.csv.gz', index=False)
+    return (df,)
 
 
 @app.cell
-def _(plt):
-    _fig, _ax = plt.subplots(1, 4, figsize=(16, 4))
+def _(bm_C, bm_P, bm_a, bm_best, bm_w, df, np, plt, qkp_profit):
+    # Configurations to plot, one row each: (P, n, init_size, seed)
+    _show = [
+        (0.1, 0.1, 10, 0),
+        (1.0, 1.0, 10, 0),
+        (0.1, 2.0, 10, 0),
+    ]
 
+    _by_cfg = df.set_index(['P', 'n', 'init_size', 'seed'])
+    _fig, _ax = plt.subplots(len(_show), 4, figsize=(20, 4 * len(_show)), squeeze=False)
+    for (_a0, _a1, _a2, _a3), _cfg in zip(_ax, _show):
+        _r = _by_cfg.loc[_cfg]
+        _x = (1 + _r.states[:, :len(bm_w)]) / 2
+        _fits = _x @ bm_w <= bm_C
+        _profit = np.array([qkp_profit(_xi, bm_P) for _xi in _x])
+        _over = _x @ bm_w - bm_C                                        # item weight above the capacity
+        _g = ((1 + _r.states) / 2) @ bm_a - bm_C                        # g(x) that drives λ (items + slack)
+
+        _a0.plot(np.where(_fits, _profit, np.nan), 'o', label='items fit')
+        _a0.plot(np.where(~_fits, _profit, np.nan), 'x', label='overweight')
+        _a0.plot(np.fmax.accumulate(np.where(_fits, _profit, np.nan)), color='C2', label='best feasible so far')
+        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a0.set_title('P={}, n={}, init_size={}, seed={}'.format(*_cfg))
+        _a0.set_ylabel('profit')
+
+        _a1.plot(np.where(_fits, _over, np.nan), 'o')
+        _a1.plot(np.where(~_fits, _over, np.nan), 'x')
+        _a1.plot(_g, color='gray', label='g = a·z − C')
+        _a1.axhline(0, color='black', linestyle='--')
+        _a1.set_ylabel('item weight − C')
+
+        _a2.plot(_r.lambdas)
+        _a2.set_ylabel('λ')
+
+        _a3.plot(_x @ bm_w, _profit, color='gray', linewidth=0.5)       # path from run to run
+        _sc = _a3.scatter(_x @ bm_w, _profit, c=np.arange(len(_profit)), s=15)
+        _a3.axvline(bm_C, color='black', linestyle='--')
+        _a3.axhline(bm_best, color='black', linestyle='--')
+        _a3.set_xlabel('item weight')
+        _a3.set_ylabel('profit')
+        _fig.colorbar(_sc, ax=_a3, label='run')
+        for _a in (_a0, _a1, _a2):
+            _a.set_xlabel('run')
+    _ax[0, 0].legend()
+    _ax[0, 1].legend()
+    _fig.tight_layout()
     _fig
     return
 
