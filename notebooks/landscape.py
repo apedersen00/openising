@@ -493,9 +493,9 @@ def _(
     }
 
     _N_ITER = 50
-    INIT_SIZES = [1, 5, 10, 20, 40]
+    INIT_SIZES = [1, 10, 20, 40, 60, 80]
     END_SIZE = 1
-    SEEDS = 100
+    SEEDS = 200
 
     lagrange_results = []
 
@@ -535,56 +535,194 @@ def _(
                 }))
 
     df = pd.concat(lagrange_results, ignore_index=True)
-    df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs.csv.gz', index=False)
-    return (df,)
+
+    if False:
+        df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs.csv.gz', index=False)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Load results
+    """)
+    return
 
 
 @app.cell
-def _(bm_C, bm_P, bm_a, bm_best, bm_w, df, np, plt, qkp_profit):
-    # Configurations to plot, one row each: (P, n, init_size, seed)
+def _(Path, pd):
+    df_runs = pd.read_csv(Path(__file__).parent.parent / 'data/lagrance_runs.csv.gz')
+    df_runs['run'] = df_runs.groupby(['P', 'n', 'init_size', 'seed']).cumcount()
+    return (df_runs,)
+
+
+@app.cell
+def _(bm_C, bm_best, df_runs, np):
+    TARGET = 0.01
+    _cfg = ['P', 'n', 'init_size', 'seed']
+    _n_iter = df_runs.run.max() + 1
+
+    _ok = (df_runs.weight <= bm_C) & (df_runs.profit >= (1 - TARGET) * bm_best)    # this run is a solution
+    runs_to_target = df_runs.run.where(_ok).groupby([df_runs[c] for c in _cfg]).min() + 1   # first solution, NaN: never
+
+    def tts99(r):
+        """Runs needed for a 99% chance of a solution, repeating the whole solve (λ from 0) with budget k; best k."""
+        k = np.arange(1, _n_iter + 1)
+        p = np.minimum((r.to_numpy()[:, None] <= k).mean(axis=0), 0.99)        # success probability within k runs
+        with np.errstate(divide='ignore'):
+            reps = np.where(p > 0, np.log(0.01) / np.log(1 - p), np.inf)       # repetitions needed for 99%
+        return (k * reps).min()
+
+    tts = runs_to_target.groupby(['P', 'n', 'init_size']).agg(
+        p_hit=lambda r: r.notna().mean(),
+        median_runs='median',
+        tts99=tts99,
+    )
+    tts.sort_values('tts99')
+    return (TARGET,)
+
+
+@app.cell
+def _(TARGET, bm_C, bm_best, df_runs, plt):
+    FLOOR = 1e-5                                                                # gap 0 (optimum found) is drawn here
     _show = [
-        (0.1, 0.1, 10, 0),
-        (1.0, 1.0, 10, 0),
-        (0.1, 2.0, 10, 0),
+        (0.05, 0.05, 1),
+        (0.05, 0.05, 10),
+        (0.05, 0.05, 20),
+        (0.05, 0.05, 40),
     ]
+    _seed = 0
 
-    _by_cfg = df.set_index(['P', 'n', 'init_size', 'seed'])
-    _fig, _ax = plt.subplots(len(_show), 4, figsize=(20, 4 * len(_show)), squeeze=False)
-    for (_a0, _a1, _a2, _a3), _cfg in zip(_ax, _show):
-        _r = _by_cfg.loc[_cfg]
-        _x = (1 + _r.states[:, :len(bm_w)]) / 2
-        _fits = _x @ bm_w <= bm_C
-        _profit = np.array([qkp_profit(_xi, bm_P) for _xi in _x])
-        _over = _x @ bm_w - bm_C                                        # item weight above the capacity
-        _g = ((1 + _r.states) / 2) @ bm_a - bm_C                        # g(x) that drives λ (items + slack)
+    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
+    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
+        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
+        _cfg = _cfg.assign(gap=(1 - _cfg.profit.where(_cfg.weight <= bm_C, 0) / bm_best).clip(lower=FLOOR))  # overweight counts as gap 1
+        _cfg = _cfg.assign(best=_cfg.groupby('seed').gap.cummin())                                         # best feasible so far
+        _r = _cfg[_cfg.seed == _seed]
+        _fits = _r.weight <= bm_C
 
-        _a0.plot(np.where(_fits, _profit, np.nan), 'o', label='items fit')
-        _a0.plot(np.where(~_fits, _profit, np.nan), 'x', label='overweight')
-        _a0.plot(np.fmax.accumulate(np.where(_fits, _profit, np.nan)), color='C2', label='best feasible so far')
-        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
-        _a0.set_title('P={}, n={}, init_size={}, seed={}'.format(*_cfg))
-        _a0.set_ylabel('profit')
+        _a0.plot(_cfg.pivot(index='run', columns='seed', values='best'), color='C2', alpha=0.05)
+        _a0.plot(_r.run, _r.best, color='C2', label='best feasible so far')
+        _a0.plot(_r.run, _r.gap.where(_fits), 'o', color='C0', label='items fit')
+        _a0.plot(_r.run, _r.gap.where(~_fits), 'x', color='C1', label='overweight')
+        _a0.axhline(TARGET, color='black', linestyle='--', label='1% of optimum')
+        _a0.set_yscale('log')
+        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
 
-        _a1.plot(np.where(_fits, _over, np.nan), 'o')
-        _a1.plot(np.where(~_fits, _over, np.nan), 'x')
-        _a1.plot(_g, color='gray', label='g = a·z − C')
-        _a1.axhline(0, color='black', linestyle='--')
-        _a1.set_ylabel('item weight − C')
-
-        _a2.plot(_r.lambdas)
-        _a2.set_ylabel('λ')
-
-        _a3.plot(_x @ bm_w, _profit, color='gray', linewidth=0.5)       # path from run to run
-        _sc = _a3.scatter(_x @ bm_w, _profit, c=np.arange(len(_profit)), s=15)
-        _a3.axvline(bm_C, color='black', linestyle='--')
-        _a3.axhline(bm_best, color='black', linestyle='--')
-        _a3.set_xlabel('item weight')
-        _a3.set_ylabel('profit')
-        _fig.colorbar(_sc, ax=_a3, label='run')
-        for _a in (_a0, _a1, _a2):
-            _a.set_xlabel('run')
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _a1.plot(_lams, color='gray', alpha=0.1)
+        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
+        _a1.set_xlabel('run')
+    _ax[0, 0].set_ylabel('gap to optimum')
+    _ax[1, 0].set_ylabel('λ')
     _ax[0, 0].legend()
-    _ax[0, 1].legend()
+    _ax[1, 0].legend()
+    _fig.tight_layout()
+    _fig
+
+    return
+
+
+@app.cell
+def _(bm_C, bm_best, df_runs, plt):
+    _show = [
+        (0.05, 0.05, 1),
+        (0.05, 0.05, 10),
+        (0.05, 0.05, 20),
+        (0.05, 0.05, 40),
+    ]
+    _seed = 0
+
+    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
+    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
+        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
+        _r = _cfg[_cfg.seed == _seed]
+        _fits = _r.weight <= bm_C
+
+        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
+        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
+        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
+        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
+
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _a1.plot(_lams, color='gray', alpha=0.1)
+        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
+        _a1.set_xlabel('run')
+    _ax[0, 0].set_ylabel('profit')
+    _ax[1, 0].set_ylabel('λ')
+    _ax[0, 0].legend()
+    _ax[1, 0].legend()
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(bm_C, bm_best, df_runs, plt):
+    _show = [
+        (0.05, 0.05, 20),
+        (0.05, 0.10, 20),
+        (0.05, 0.20, 20),
+        (0.05, 0.50, 20),
+    ]
+    _seed = 0
+
+    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
+    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
+        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
+        _r = _cfg[_cfg.seed == _seed]
+        _fits = _r.weight <= bm_C
+
+        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
+        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
+        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
+        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
+
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _a1.plot(_lams, color='gray', alpha=0.1)
+        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
+        _a1.set_xlabel('run')
+    _ax[0, 0].set_ylabel('profit')
+    _ax[1, 0].set_ylabel('λ')
+    _ax[0, 0].legend()
+    _ax[1, 0].legend()
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(bm_C, bm_best, df_runs, plt):
+    _show = [
+        (0.05, 0.10, 20),
+        (0.10, 0.10, 20),
+        (0.20, 0.10, 20),
+        (0.50, 0.10, 20),
+    ]
+    _seed = 0
+
+    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
+    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
+        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
+        _r = _cfg[_cfg.seed == _seed]
+        _fits = _r.weight <= bm_C
+
+        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
+        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
+        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
+        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
+        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
+
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _a1.plot(_lams, color='gray', alpha=0.1)
+        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
+        _a1.set_xlabel('run')
+    _ax[0, 0].set_ylabel('profit')
+    _ax[1, 0].set_ylabel('λ')
+    _ax[0, 0].legend()
+    _ax[1, 0].legend()
     _fig.tight_layout()
     _fig
     return
