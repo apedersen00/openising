@@ -412,7 +412,7 @@ def _(mo):
 
 
 @app.cell
-def _(analog_event, cluster_size, njit, np):
+def _(analog_event, njit, np):
     @njit
     def energy(s, J, h):
         return -0.5 * s.T @ J @ s - h @ s
@@ -456,11 +456,22 @@ def _(analog_event, cluster_size, njit, np):
                 v[c] *= -1
         return states, lams
 
-    def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6):
+
+    def cluster_size_exp(it, n_iter, init_size, end_size, exponent=3.0):
+        """
+        Exponential decay from init_size to end_size over n_iter.
+        """
+        decay = ((end_size - 1) / init_size) ** (it * exponent / (n_iter - 1))
+        return int(np.floor(decay * (init_size - end_size) + end_size))
+
+    def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6, exponent=3.0):
         rng = np.random.default_rng(seed)
         n = len(h_obj)
         v = rng.uniform(-1, 1, n)
-        sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])   # List of cluster sizes e.g. [10, 5, 1]
+
+        sizes = np.array([cluster_size_exp(it, n_iter, init_size, end_size, exponent) for it in range(n_iter)])
+        # sizes = np.array([cluster_size(it, n_iter, init_size, end_size) for it in range(n_iter)])   # List of cluster sizes e.g. [10, 5, 1]
+
         clusters = np.zeros((n_iter, n), dtype=np.int64)                                            # Array of which spins in each cluster
         for it in range(n_iter):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
@@ -488,7 +499,7 @@ def _(
     qkp_profit,
 ):
     # This takes a while, change this if you really want to run
-    RUN_BENCH = False
+    RUN_BENCH = True
 
     # Parameters to sweep. All combinations will be tested
     RUNS = {
@@ -497,9 +508,13 @@ def _(
     }
 
     _N_ITER = 50
-    INIT_SIZES = [1, 10, 20, 40, 60, 80]
-    END_SIZE = 1
+    # INIT_SIZES = [1, 10, 20, 40, 60, 80]
+    # END_SIZE = 1
     SEEDS = 200
+
+    INIT_SIZES = [int(0.4 * len(bm_h_obj)), int(0.8 * len(bm_h_obj))]
+    END_SIZE = int(0.0625 * len(bm_h_obj))
+    EXPONENTS = [1.0, 2.0, 3.0]
 
     lagrange_results = []
 
@@ -507,44 +522,47 @@ def _(
         if not RUN_BENCH:
             break
         for _init_size in INIT_SIZES:
-            for _seed in range(SEEDS):
-                _states, _lambdas = multiplicative_lagrange(
-                    bm_J_obj,
-                    bm_h_obj,
-                    bm_J_pen,
-                    bm_h_pen,
-                    bm_a,
-                    bm_C,
-                    _P,
-                    _n,
-                    n_iter=_N_ITER,
-                    init_size=_init_size,
-                    end_size=END_SIZE,
-                    seed=_seed,
-                )
+            for _exp in EXPONENTS:
+                for _seed in range(SEEDS):
+                    _states, _lambdas = multiplicative_lagrange(
+                        bm_J_obj,
+                        bm_h_obj,
+                        bm_J_pen,
+                        bm_h_pen,
+                        bm_a,
+                        bm_C,
+                        _P,
+                        _n,
+                        n_iter=_N_ITER,
+                        init_size=_init_size,
+                        end_size=END_SIZE,
+                        seed=_seed,
+                        exponent=_exp,
+                    )
 
-                _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
-                _z = (1 + _states) / 2  # convert [-1, +1] to [0, 1]
-                _x = _z[:, :len(bm_w)]  # slice off the binary weighted weights
+                    _gap, _feas = evaluate_qkp(_states, bm_w, bm_P, bm_C, bm_best)
+                    _z = (1 + _states) / 2  # convert [-1, +1] to [0, 1]
+                    _x = _z[:, :len(bm_w)]  # slice off the binary weighted weights
 
-                lagrange_results.append(pd.DataFrame({
-                    'P': _P,
-                    'n': _n,
-                    'init_size': _init_size,
-                    'seed': _seed,
-                    'gap': _gap,
-                    'feasible': _feas,
-                    'lambda': _lambdas,
-                    'profit': [qkp_profit(_xi, bm_P) for _xi in _x],
-                    'weight': _x @ bm_w,
-                    'penalty': _z @ bm_a - bm_C
-                }))
+                    lagrange_results.append(pd.DataFrame({
+                        'P': _P,
+                        'n': _n,
+                        'init_size': _init_size,
+                        'exponent': _exp,
+                        'seed': _seed,
+                        'gap': _gap,
+                        'feasible': _feas,
+                        'lambda': _lambdas,
+                        'profit': [qkp_profit(_xi, bm_P) for _xi in _x],
+                        'weight': _x @ bm_w,
+                        'penalty': _z @ bm_a - bm_C
+                    }))
 
     if RUN_BENCH:
         df = pd.concat(lagrange_results, ignore_index=True)
 
     if RUN_BENCH:
-        df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs_nowinner.csv.gz', index=False)
+        df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz', index=False)
     return
 
 
@@ -558,7 +576,7 @@ def _(mo):
 
 @app.cell
 def _(Path, pd):
-    df_runs = pd.read_csv(Path(__file__).parent.parent / 'data/lagrance_runs_nowinner.csv.gz')
+    df_runs = pd.read_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz')
     df_runs['run'] = df_runs.groupby(['P', 'n', 'init_size', 'seed']).cumcount()
     return (df_runs,)
 
