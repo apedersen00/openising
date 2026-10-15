@@ -563,7 +563,7 @@ def _(
 
     if RUN_BENCH:
         df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz', index=False)
-    return (END_SIZE,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -575,84 +575,52 @@ def _(mo):
 
 
 @app.cell
-def _(Path, pd):
-    df_runs = pd.read_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz')
-    df_runs['run'] = df_runs.groupby(['P', 'n', 'init_size', 'seed', 'exponent']).cumcount()
-    return (df_runs,)
+def _(Path, bm_C, bm_best, pd):
+    _FILES = {                                                              # variant: data file (see data/README.md)
+        'linear, winner': 'lagrance_runs.csv.gz',
+        'linear, latest': 'lagrance_runs_nowinner.csv.gz',
+        'exp, winner': 'lagrance_runs_expcluster.csv.gz',
+    }
+    SETTINGS = ['variant', 'P', 'n', 'init_size', 'exponent']              # one solver setting: 200 seeds of 50 runs each
+
+    df_runs = pd.concat([pd.read_csv(Path(__file__).parent.parent / 'data' / _file).assign(variant=_variant)
+                         for _variant, _file in _FILES.items()], ignore_index=True)
+    df_runs['run'] = df_runs.groupby(SETTINGS + ['seed']).cumcount()                     # 0 ... 49
+    df_runs['gap'] = 1 - df_runs.profit.where(df_runs.weight <= bm_C, 0) / bm_best      # gap of each run (overweight counts as 1)
+    return SETTINGS, df_runs
 
 
 @app.cell
-def _(bm_C, bm_best, df_runs, np, pd):
-    TARGET = 0.01                       # Within 1% of the optimum
-    _n_iter = df_runs.run.max() + 1     # Num iterations
-
-    def first_hit(r, target=0.01):
-        """
-        Return number of runs until the first one that is within TARGET.
-        """
-        ok = (r.weight <= bm_C) &  (r.profit >= (1 - target) * bm_best)
-        return r.run[ok].min() + 1 if ok.any() else np.inf
+def _(SETTINGS, df_runs, np, pd):
+    TARGETS = [0.01, 0.001]                 # solved = within 1% or 0.1% of the optimum
+    _n_iter = df_runs.run.max() + 1         # runs per seed
 
     def tts99(hits):
         """
-        Runs needed for a 99% chance of a solution
+        Runs needed for a 99% chance of a solution.
+        hits: the run where each seed first solved it (NaN if never).
         """
         best = np.inf
         for k in range(1, _n_iter + 1):
-            p = np.mean(hits <= k)
+            p = np.mean(hits <= k)          # fraction of seeds solved within k runs
             if p == 0:
                 continue
             repeats = 1 if p >= 0.99 else np.log(0.01) / np.log(1 - p)
             best = min(best, k * repeats)
         return best
 
-    _rows = []
-    for (_P, _n, _init_size, _exp), _cfg in df_runs.groupby(['P', 'n', 'init_size', 'exponent']):
-        _hits = np.array([first_hit(_r, TARGET) for _, _r in _cfg.groupby('seed')])
-        _solved = _hits[_hits < np.inf]
-        _rows.append({
-            'P': _P,
-            'n': _n,
-            'init_size': _init_size,
-            'p_hit': len(_solved) / len(_hits),
-            'median_runs': np.median(_solved) if len(_solved) else np.nan,
-            'tts99': tts99(_hits),
-        })
-
-    tts = pd.DataFrame(_rows)
-    tts.sort_values('tts99')
-    return TARGET, first_hit, tts99
+    _cols = {}
+    for _target in TARGETS:
+        _hit = (df_runs.run + 1).where(df_runs.gap <= _target)                       # run number if solved, else NaN
+        _first = _hit.groupby([df_runs[_c] for _c in SETTINGS + ['seed']]).min()     # first solved run of each seed
+        _cols[f'tts99 {_target:.1%}'] = _first.groupby(SETTINGS).apply(tts99)
+    tts = pd.DataFrame(_cols).reset_index()
+    tts
+    return TARGETS, tts
 
 
 @app.cell
-def _(Path, first_hit, np, pd, tts99):
-    FILES = {                                                       # variant: data file
-        'linear, winner': 'lagrance_runs.csv.gz',
-        'linear, latest': 'lagrance_runs_nowinner.csv.gz',
-        'exp, winner': 'lagrance_runs_expcluster.csv.gz',
-    }
-    TARGETS = [0.01, 0.001]
-
-    _rows = []
-    for _variant, _file in FILES.items():
-        _d = pd.read_csv(Path(__file__).parent.parent / 'data' / _file)
-        if 'exponent' not in _d:
-            _d['exponent'] = 0.0                                    # linear schedule: no exponent
-        _d['run'] = _d.groupby(['P', 'n', 'init_size', 'exponent', 'seed']).cumcount()
-        for (_P, _n, _init_size, _exp), _cfg in _d.groupby(['P', 'n', 'init_size', 'exponent']):
-            _row = {'variant': _variant, 'P': _P, 'n': _n, 'init_size': _init_size, 'exponent': _exp}
-            for _target in TARGETS:
-                _hits = np.array([first_hit(_r, _target) for _, _r in _cfg.groupby('seed')])
-                _row[f'tts99 {_target:.1%}'] = tts99(_hits)
-            _rows.append(_row)
-
-    compare = pd.DataFrame(_rows)
-    compare
-    return (compare,)
-
-
-@app.cell
-def _(compare, np, pd):
+def _(np, pd, tts):
     _metric = 'tts99 0.1%'
 
     def explained(table, col, metric):
@@ -661,17 +629,17 @@ def _(compare, np, pd):
         m = table.groupby(col)[metric].transform('mean')
         return ((m - y.mean())**2).sum() / ((y - y.mean())**2).sum()
 
-    _t = compare.assign(ratio=compare.n / compare.P,
-                        log_tts=np.log10(compare[_metric].clip(upper=1e5)))      # never reached → 10^5 runs
+    _t = tts.assign(ratio=tts.n / tts.P,
+                    log_tts=np.log10(tts[_metric].clip(upper=1e5)))              # never reached → 10^5 runs
     pd.DataFrame({_v: {_c: explained(_tv, _c, 'log_tts') for _c in ['P', 'n', 'ratio', 'init_size', 'exponent']}
                   for _v, _tv in _t.groupby('variant')}).round(2)
     return
 
 
 @app.cell
-def _(compare, plt):
+def _(plt, tts):
     _col = 'tts99 0.1%'
-    _best = compare.groupby(['variant', 'P', 'n'])[_col].min().reset_index()      # best init_size / exponent per (P, n)
+    _best = tts.groupby(['variant', 'P', 'n'])[_col].min().reset_index()          # best init_size / exponent per (P, n)
     _variants = _best.variant.unique()
 
     _fig, _ax = plt.subplots(1, len(_variants), figsize=(5 * len(_variants), 4), sharey=True, squeeze=False)
@@ -690,22 +658,23 @@ def _(compare, plt):
 
 
 @app.cell
-def _(END_SIZE, TARGET, bm_C, bm_best, cluster_size_exp, df_runs, plt):
-    _FLOOR = 1e-5                                                                # gap 0 (optimum found) is drawn here
-    _show = [                                                                   # (P, n, init_size, exponent)
-        (0.05, 0.05, 88, 1.0),
-        (0.05, 0.05, 88, 2.0),
-        (0.05, 0.05, 88, 3.0),
-        (0.05, 0.05, 44, 1.0),
+def _(SETTINGS, TARGETS, bm_C, cluster_size, cluster_size_exp, df_runs, plt):
+    _FLOOR = 1e-5                                                               # gap 0 (optimum found) is drawn here
+    _show = [                                                                   # (variant, P, n, init_size, exponent)
+        ('linear, winner', 0.05, 0.05, 80, 0.0),
+        ('linear, latest', 0.05, 0.1, 40, 0.0),
+        ('exp, winner', 0.05, 0.05, 88, 1.0),
+        ('exp, winner', 0.05, 0.05, 88, 3.0),
     ]
     _seed = 0
+    _by_setting = df_runs.groupby(SETTINGS)
 
     _fig, _ax = plt.subplots(3, len(_show), figsize=(4 * len(_show), 9), sharex=True, squeeze=False,
                              gridspec_kw={'height_ratios': [2, 2, 1]})
-    for (_a0, _a1, _a2), (_P, _n, _init_size, _exp) in zip(_ax.T, _show):
-        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size) & (df_runs.exponent == _exp)]
-        _cfg = _cfg.assign(gap=(1 - _cfg.profit.where(_cfg.weight <= bm_C, 0) / bm_best).clip(lower=_FLOOR))  # overweight counts as gap 1
-        _cfg = _cfg.assign(best=_cfg.groupby('seed').gap.cummin())                                         # best feasible so far
+    for (_a0, _a1, _a2), (_variant, _P, _n, _init_size, _exp) in zip(_ax.T, _show):
+        _cfg = _by_setting.get_group((_variant, _P, _n, _init_size, _exp))
+        _cfg = _cfg.assign(gap=_cfg.gap.clip(lower=_FLOOR))
+        _cfg = _cfg.assign(best=_cfg.groupby('seed').gap.cummin())             # best feasible so far
         _r = _cfg[_cfg.seed == _seed]
         _fits = _r.weight <= bm_C
 
@@ -713,167 +682,26 @@ def _(END_SIZE, TARGET, bm_C, bm_best, cluster_size_exp, df_runs, plt):
         _a0.plot(_r.run, _r.best, color='C2', label='best feasible so far')
         _a0.plot(_r.run, _r.gap.where(_fits), 'o', color='C0', label='items fit')
         _a0.plot(_r.run, _r.gap.where(~_fits), 'x', color='C1', label='overweight')
-        _a0.axhline(TARGET, color='black', linestyle='--', label='1% of optimum')
+        for _t in TARGETS:                                                      # 1% and 0.1% of optimum
+            _a0.axhline(_t, color='black', linestyle='--')
         _a0.set_yscale('log')
-        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}, exp={_exp}')
+        _a0.set_title(f'{_variant}\nP={_P}, n={_n}, init_size={_init_size}, exp={_exp}')
 
-        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')       # one column per seed
         _a1.plot(_lams, color='gray', alpha=0.1)
         _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
 
         _n_iter = len(_r)
-        _sizes = [cluster_size_exp(_it, _n_iter, _init_size, END_SIZE, _exp) for _it in range(_n_iter)]
-        _a2.plot(_r.run[1:], _sizes[:-1], '.-', color='C3')                  # sizes[it] kicks the start of run it + 1
+        if _exp == 0:                                                           # linear decay to 1 spin (data/README.md)
+            _sizes = [cluster_size(_it, _n_iter, _init_size, 1) for _it in range(_n_iter)]
+        else:                                                                   # exponential decay to 6 spins (data/README.md)
+            _sizes = [cluster_size_exp(_it, _n_iter, _init_size, 6, _exp) for _it in range(_n_iter)]
+        _a2.plot(_r.run[1:], _sizes[:-1], '.-', color='C3')                    # sizes[it] kicks the start of run it + 1
         _a2.set_ylim(0, None)
         _a2.set_xlabel('run')
     _ax[0, 0].set_ylabel('gap to optimum')
     _ax[1, 0].set_ylabel('λ')
     _ax[2, 0].set_ylabel('spins kicked before run')
-    _ax[0, 0].legend()
-    _ax[1, 0].legend()
-    _fig.tight_layout()
-    _fig
-    return
-
-
-@app.cell
-def _(TARGET, bm_C, bm_best, df_runs, plt):
-    FLOOR = 1e-5                                                                # gap 0 (optimum found) is drawn here
-    _show = [
-        (0.05, 0.05, 1),
-        (0.05, 0.05, 20),
-        (0.05, 0.05, 40),
-        (0.05, 0.05, 80),
-    ]
-    _seed = 0
-
-    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
-    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
-        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
-        _cfg = _cfg.assign(gap=(1 - _cfg.profit.where(_cfg.weight <= bm_C, 0) / bm_best).clip(lower=FLOOR))  # overweight counts as gap 1
-        _cfg = _cfg.assign(best=_cfg.groupby('seed').gap.cummin())                                         # best feasible so far
-        _r = _cfg[_cfg.seed == _seed]
-        _fits = _r.weight <= bm_C
-
-        _a0.plot(_cfg.pivot(index='run', columns='seed', values='best'), color='C2', alpha=0.05)
-        _a0.plot(_r.run, _r.best, color='C2', label='best feasible so far')
-        _a0.plot(_r.run, _r.gap.where(_fits), 'o', color='C0', label='items fit')
-        _a0.plot(_r.run, _r.gap.where(~_fits), 'x', color='C1', label='overweight')
-        _a0.axhline(TARGET, color='black', linestyle='--', label='1% of optimum')
-        _a0.set_yscale('log')
-        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
-
-        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
-        _a1.plot(_lams, color='gray', alpha=0.1)
-        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
-        _a1.set_xlabel('run')
-    _ax[0, 0].set_ylabel('gap to optimum')
-    _ax[1, 0].set_ylabel('λ')
-    _ax[0, 0].legend()
-    _ax[1, 0].legend()
-    _fig.tight_layout()
-    _fig
-    return
-
-
-@app.cell
-def _(bm_C, bm_best, df_runs, plt):
-    _show = [
-        (0.05, 0.05, 1),
-        (0.05, 0.05, 10),
-        (0.05, 0.05, 20),
-        (0.05, 0.05, 40),
-    ]
-    _seed = 0
-
-    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
-    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
-        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
-        _r = _cfg[_cfg.seed == _seed]
-        _fits = _r.weight <= bm_C
-
-        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
-        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
-        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
-        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
-        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
-
-        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
-        _a1.plot(_lams, color='gray', alpha=0.1)
-        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
-        _a1.set_xlabel('run')
-    _ax[0, 0].set_ylabel('profit')
-    _ax[1, 0].set_ylabel('λ')
-    _ax[0, 0].legend()
-    _ax[1, 0].legend()
-    _fig.tight_layout()
-    _fig
-    return
-
-
-@app.cell
-def _(bm_C, bm_best, df_runs, plt):
-    _show = [
-        (0.05, 0.05, 20),
-        (0.05, 0.10, 20),
-        (0.05, 0.20, 20),
-        (0.05, 0.50, 20),
-    ]
-    _seed = 0
-
-    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
-    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
-        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
-        _r = _cfg[_cfg.seed == _seed]
-        _fits = _r.weight <= bm_C
-
-        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
-        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
-        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
-        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
-        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
-
-        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
-        _a1.plot(_lams, color='gray', alpha=0.1)
-        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
-        _a1.set_xlabel('run')
-    _ax[0, 0].set_ylabel('profit')
-    _ax[1, 0].set_ylabel('λ')
-    _ax[0, 0].legend()
-    _ax[1, 0].legend()
-    _fig.tight_layout()
-    _fig
-    return
-
-
-@app.cell
-def _(bm_C, bm_best, df_runs, plt):
-    _show = [
-        (0.05, 0.10, 20),
-        (0.10, 0.10, 20),
-        (0.20, 0.10, 20),
-        (0.50, 0.10, 20),
-    ]
-    _seed = 0
-
-    _fig, _ax = plt.subplots(2, len(_show), figsize=(4 * len(_show), 7), sharex=True, squeeze=False)
-    for (_a0, _a1), (_P, _n, _init_size) in zip(_ax.T, _show):
-        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size)]
-        _r = _cfg[_cfg.seed == _seed]
-        _fits = _r.weight <= bm_C
-
-        _a0.plot(_r.run, _r.profit.where(_fits), 'o', label='items fit')
-        _a0.plot(_r.run, _r.profit.where(~_fits), 'x', label='overweight')
-        _a0.plot(_r.run, _r.profit.where(_fits).cummax().ffill(), color='C2', label='best feasible so far')
-        _a0.axhline(bm_best, color='black', linestyle='--', label='optimum')
-        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}')
-
-        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
-        _a1.plot(_lams, color='gray', alpha=0.1)
-        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
-        _a1.set_xlabel('run')
-    _ax[0, 0].set_ylabel('profit')
-    _ax[1, 0].set_ylabel('λ')
     _ax[0, 0].legend()
     _ax[1, 0].legend()
     _fig.tight_layout()
