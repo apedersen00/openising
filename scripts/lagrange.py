@@ -176,7 +176,7 @@ def qkp_penalty(a, sigma, C):
 
 
 @njit
-def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events):
+def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events, update, beta1, beta2):
     """
     Args:
         - J_obj, h_obj: f in Ising form
@@ -192,6 +192,8 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
     lams = np.zeros(n_iter)                             # lambdas for every run
     winner = np.zeros(n)                                # winner: the state we perturb on next iteration
     lam = 0.0                                           # Current lambda (lambda_0 = 0 from algorithm)
+    m = 0.0                                             # running average of g (momentum)
+    s2 = 0.0                                            # running average of g**2 (adam)
     for it in range(n_iter):                            # Do K iterations
         h = h_obj + P * h_pen - lam * a / 2             # Add the Lagrange term (only affects bias)
         sigma, T, _ = analog_event(J, h, v, max_events) # Run the typical solver
@@ -203,6 +205,17 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
             winner = sigma.copy()
         elif energy(sigma, J, h) < energy(winner, J, h):
             winner = sigma.copy()
+
+        g = qkp_penalty(a, sigma, C)
+        if update == 'momentum':
+            m = beta1 * m + (1 - beta1) * g
+            lam += eta * m
+        elif update == 'adam':
+            m = beta1 * m + (1 - beta1) * g
+            s2 = beta2 * s2 + (1 - beta2) * g**2
+            lam += eta * (m / (1 - beta1**(it + 1))) / (np.sqrt(s2 / (1 - beta2**(it + 1))) + 1e-8)
+        else:
+            lam += eta * g
 
         lam += eta * qkp_penalty(a, sigma, C)
         v = winner.copy()
