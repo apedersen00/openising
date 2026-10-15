@@ -477,7 +477,7 @@ def _(analog_event, njit, np):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
         return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events)
 
-    return (multiplicative_lagrange,)
+    return cluster_size_exp, multiplicative_lagrange
 
 
 @app.cell
@@ -499,7 +499,7 @@ def _(
     qkp_profit,
 ):
     # This takes a while, change this if you really want to run
-    RUN_BENCH = True
+    RUN_BENCH = False
 
     # Parameters to sweep. All combinations will be tested
     RUNS = {
@@ -563,7 +563,7 @@ def _(
 
     if RUN_BENCH:
         df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz', index=False)
-    return
+    return (END_SIZE,)
 
 
 @app.cell(hide_code=True)
@@ -577,7 +577,7 @@ def _(mo):
 @app.cell
 def _(Path, pd):
     df_runs = pd.read_csv(Path(__file__).parent.parent / 'data/lagrance_runs_expcluster.csv.gz')
-    df_runs['run'] = df_runs.groupby(['P', 'n', 'init_size', 'seed']).cumcount()
+    df_runs['run'] = df_runs.groupby(['P', 'n', 'init_size', 'seed', 'exponent']).cumcount()
     return (df_runs,)
 
 
@@ -586,11 +586,11 @@ def _(bm_C, bm_best, df_runs, np, pd):
     TARGET = 0.01                       # Within 1% of the optimum
     _n_iter = df_runs.run.max() + 1     # Num iterations
 
-    def first_hit(r):
+    def first_hit(r, target=0.01):
         """
         Return number of runs until the first one that is within TARGET.
         """
-        ok = (r.weight <= bm_C) &  (r.profit >= (1 - TARGET) * bm_best)
+        ok = (r.weight <= bm_C) &  (r.profit >= (1 - target) * bm_best)
         return r.run[ok].min() + 1 if ok.any() else np.inf
 
     def tts99(hits):
@@ -607,8 +607,8 @@ def _(bm_C, bm_best, df_runs, np, pd):
         return best
 
     _rows = []
-    for (_P, _n, _init_size), _cfg in df_runs.groupby(['P', 'n', 'init_size']):
-        _hits = np.array([first_hit(_r) for _, _r in _cfg.groupby('seed')])
+    for (_P, _n, _init_size, _exp), _cfg in df_runs.groupby(['P', 'n', 'init_size', 'exponent']):
+        _hits = np.array([first_hit(_r, TARGET) for _, _r in _cfg.groupby('seed')])
         _solved = _hits[_hits < np.inf]
         _rows.append({
             'P': _P,
@@ -621,7 +621,119 @@ def _(bm_C, bm_best, df_runs, np, pd):
 
     tts = pd.DataFrame(_rows)
     tts.sort_values('tts99')
-    return (TARGET,)
+    return TARGET, first_hit, tts99
+
+
+@app.cell
+def _(Path, first_hit, np, pd, tts99):
+    FILES = {                                                       # variant: data file
+        'linear, winner': 'lagrance_runs.csv.gz',
+        'linear, latest': 'lagrance_runs_nowinner.csv.gz',
+        'exp, winner': 'lagrance_runs_expcluster.csv.gz',
+    }
+    TARGETS = [0.01, 0.001]
+
+    _rows = []
+    for _variant, _file in FILES.items():
+        _d = pd.read_csv(Path(__file__).parent.parent / 'data' / _file)
+        if 'exponent' not in _d:
+            _d['exponent'] = 0.0                                    # linear schedule: no exponent
+        _d['run'] = _d.groupby(['P', 'n', 'init_size', 'exponent', 'seed']).cumcount()
+        for (_P, _n, _init_size, _exp), _cfg in _d.groupby(['P', 'n', 'init_size', 'exponent']):
+            _row = {'variant': _variant, 'P': _P, 'n': _n, 'init_size': _init_size, 'exponent': _exp}
+            for _target in TARGETS:
+                _hits = np.array([first_hit(_r, _target) for _, _r in _cfg.groupby('seed')])
+                _row[f'tts99 {_target:.1%}'] = tts99(_hits)
+            _rows.append(_row)
+
+    compare = pd.DataFrame(_rows)
+    compare
+    return (compare,)
+
+
+@app.cell
+def _(compare, np, pd):
+    _metric = 'tts99 0.1%'
+
+    def explained(table, col, metric):
+        """Share of the variance of metric explained by the group means of col."""
+        y = table[metric]
+        m = table.groupby(col)[metric].transform('mean')
+        return ((m - y.mean())**2).sum() / ((y - y.mean())**2).sum()
+
+    _t = compare.assign(ratio=compare.n / compare.P,
+                        log_tts=np.log10(compare[_metric].clip(upper=1e5)))      # never reached → 10^5 runs
+    pd.DataFrame({_v: {_c: explained(_tv, _c, 'log_tts') for _c in ['P', 'n', 'ratio', 'init_size', 'exponent']}
+                  for _v, _tv in _t.groupby('variant')}).round(2)
+    return
+
+
+@app.cell
+def _(compare, plt):
+    _col = 'tts99 0.1%'
+    _best = compare.groupby(['variant', 'P', 'n'])[_col].min().reset_index()      # best init_size / exponent per (P, n)
+    _variants = _best.variant.unique()
+
+    _fig, _ax = plt.subplots(1, len(_variants), figsize=(5 * len(_variants), 4), sharey=True, squeeze=False)
+    for _a, _v in zip(_ax[0], _variants):
+        for _P, _t in _best[_best.variant == _v].groupby('P'):
+            _a.plot(_t.n / _t.P, _t[_col], 'o-', label=f'P={_P}')
+        _a.set_xscale('log')
+        _a.set_yscale('log')
+        _a.set_title(_v)
+        _a.set_xlabel('n / P')
+    _ax[0, 0].set_ylabel(f'best {_col} (runs)')
+    _ax[0, 0].legend()
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(END_SIZE, TARGET, bm_C, bm_best, cluster_size_exp, df_runs, plt):
+    _FLOOR = 1e-5                                                                # gap 0 (optimum found) is drawn here
+    _show = [                                                                   # (P, n, init_size, exponent)
+        (0.05, 0.05, 88, 1.0),
+        (0.05, 0.05, 88, 2.0),
+        (0.05, 0.05, 88, 3.0),
+        (0.05, 0.05, 44, 1.0),
+    ]
+    _seed = 0
+
+    _fig, _ax = plt.subplots(3, len(_show), figsize=(4 * len(_show), 9), sharex=True, squeeze=False,
+                             gridspec_kw={'height_ratios': [2, 2, 1]})
+    for (_a0, _a1, _a2), (_P, _n, _init_size, _exp) in zip(_ax.T, _show):
+        _cfg = df_runs[(df_runs.P == _P) & (df_runs.n == _n) & (df_runs.init_size == _init_size) & (df_runs.exponent == _exp)]
+        _cfg = _cfg.assign(gap=(1 - _cfg.profit.where(_cfg.weight <= bm_C, 0) / bm_best).clip(lower=_FLOOR))  # overweight counts as gap 1
+        _cfg = _cfg.assign(best=_cfg.groupby('seed').gap.cummin())                                         # best feasible so far
+        _r = _cfg[_cfg.seed == _seed]
+        _fits = _r.weight <= bm_C
+
+        _a0.plot(_cfg.pivot(index='run', columns='seed', values='best'), color='C2', alpha=0.05)
+        _a0.plot(_r.run, _r.best, color='C2', label='best feasible so far')
+        _a0.plot(_r.run, _r.gap.where(_fits), 'o', color='C0', label='items fit')
+        _a0.plot(_r.run, _r.gap.where(~_fits), 'x', color='C1', label='overweight')
+        _a0.axhline(TARGET, color='black', linestyle='--', label='1% of optimum')
+        _a0.set_yscale('log')
+        _a0.set_title(f'P={_P}, n={_n}, init_size={_init_size}, exp={_exp}')
+
+        _lams = _cfg.pivot(index='run', columns='seed', values='lambda')     # one column per seed
+        _a1.plot(_lams, color='gray', alpha=0.1)
+        _a1.plot(_lams[_seed], color='C0', label=f'seed {_seed}')
+
+        _n_iter = len(_r)
+        _sizes = [cluster_size_exp(_it, _n_iter, _init_size, END_SIZE, _exp) for _it in range(_n_iter)]
+        _a2.plot(_r.run[1:], _sizes[:-1], '.-', color='C3')                  # sizes[it] kicks the start of run it + 1
+        _a2.set_ylim(0, None)
+        _a2.set_xlabel('run')
+    _ax[0, 0].set_ylabel('gap to optimum')
+    _ax[1, 0].set_ylabel('λ')
+    _ax[2, 0].set_ylabel('spins kicked before run')
+    _ax[0, 0].legend()
+    _ax[1, 0].legend()
+    _fig.tight_layout()
+    _fig
+    return
 
 
 @app.cell
@@ -629,10 +741,8 @@ def _(TARGET, bm_C, bm_best, df_runs, plt):
     FLOOR = 1e-5                                                                # gap 0 (optimum found) is drawn here
     _show = [
         (0.05, 0.05, 1),
-        (0.05, 0.05, 10),
         (0.05, 0.05, 20),
         (0.05, 0.05, 40),
-        (0.05, 0.05, 60),
         (0.05, 0.05, 80),
     ]
     _seed = 0
