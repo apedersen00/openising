@@ -24,8 +24,8 @@ Linear cluster size. Re-run from latest sigmas i.e. no energy calculation per it
 
 ```
 RUNS = {
-    'P': [0.05, 0.1, 0.2, 0.5, 1.0],
-    'n': [0.05, 0.1, 0.2, 0.5, 1.0]
+    'P': [0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0],
+    'n': [0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0]
 }
 
 _N_ITER = 50
