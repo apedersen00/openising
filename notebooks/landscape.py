@@ -444,11 +444,11 @@ def _(analog_event, cluster_size, njit, np):
             states[it] = sigma
             lams[it] = lam
 
-            winner = sigma.copy()
-            # if it == 0:
-            #     winner = sigma.copy()
-            # elif energy(sigma, J, h) < energy(winner, J, h):
-            #     winner = sigma.copy()
+            # winner = sigma.copy()
+            if it == 0:
+                winner = sigma.copy()
+            elif energy(sigma, J, h) < energy(winner, J, h):
+                winner = sigma.copy()
 
             lam += eta * qkp_penalty(a, sigma, C)
             v = winner.copy()
@@ -488,7 +488,7 @@ def _(
     qkp_profit,
 ):
     # This takes a while, change this if you really want to run
-    RUN_BENCH = True
+    RUN_BENCH = False
 
     # Parameters to sweep. All combinations will be tested
     RUNS = {
@@ -543,7 +543,7 @@ def _(
     if RUN_BENCH:
         df = pd.concat(lagrange_results, ignore_index=True)
 
-    if True:
+    if RUN_BENCH:
         df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs_nowinner.csv.gz', index=False)
     return
 
