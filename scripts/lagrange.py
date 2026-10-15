@@ -62,6 +62,16 @@ def qkp_profit(x, P):
     return profit
 
 
+def paper_rule(P, a, C):
+    """
+    P and n from Delacour 2025: P = 2dN and n = 20 after dividing the profits by their max
+    and the weights by max(a, C). Returned in our (not divided) units.
+    """
+    d = np.mean(P[~np.eye(len(P), dtype=bool)] != 0)          # density of the pair profits
+    scale = np.abs(P).max() / max(np.abs(a).max(), C)**2
+    return 2 * d * len(a) * scale, 20 * scale
+
+
 # ---------- Cluster sizes ----------
 
 def cluster_size(it, n_iter, init_size, end_size):
@@ -217,14 +227,13 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
         else:
             lam += eta * g
 
-        lam += eta * qkp_penalty(a, sigma, C)
         v = winner.copy()
         for c in clusters[it, :sizes[it]]:
             v[c] *= -1
     return states, lams
 
 
-def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6, exponent=0.0):
+def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6, exponent=0.0, update='plain', beta1=0.9, beta2=0.999):
     rng = np.random.default_rng(seed)
     n = len(h_obj)
     v = rng.uniform(-1, 1, n)
@@ -237,4 +246,4 @@ def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, in
     clusters = np.zeros((n_iter, n), dtype=np.int64)                                            # Array of which spins in each cluster
     for it in range(n_iter):
         clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
-    return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events)
+    return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events, update, beta1, beta2)
