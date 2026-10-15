@@ -38,7 +38,7 @@ def _(cluster_size, njit, np):
             - max_events: maximum number of flips per run
         """
         n = len(h)                                                          # Number of spins
-        s = np.sign(v)                                                      # sign values of spins
+        s = np.sign(v)
         for i in range(n):                                                  # If a spin is exactly at the threshold, make it +1
             if s[i] == 0:
                 s[i] = 1.0
@@ -486,6 +486,9 @@ def _(
     pd,
     qkp_profit,
 ):
+    # This takes a while, change this if you really want to run
+    RUN_BENCH = False
+
     # Parameters to sweep. All combinations will be tested
     RUNS = {
         'P': [0.05, 0.1, 0.2, 0.5, 1.0],
@@ -500,6 +503,8 @@ def _(
     lagrange_results = []
 
     for _P, _n in itertools.product(RUNS['P'], RUNS['n']):
+        if not RUN_BENCH:
+            break
         for _init_size in INIT_SIZES:
             for _seed in range(SEEDS):
                 _states, _lambdas = multiplicative_lagrange(
@@ -534,7 +539,8 @@ def _(
                     'penalty': _z @ bm_a - bm_C
                 }))
 
-    df = pd.concat(lagrange_results, ignore_index=True)
+    if RUN_BENCH:
+        df = pd.concat(lagrange_results, ignore_index=True)
 
     if False:
         df.to_csv(Path(__file__).parent.parent / 'data/lagrance_runs.csv.gz', index=False)
@@ -557,27 +563,44 @@ def _(Path, pd):
 
 
 @app.cell
-def _(bm_C, bm_best, df_runs, np):
-    TARGET = 0.01
-    _cfg = ['P', 'n', 'init_size', 'seed']
-    _n_iter = df_runs.run.max() + 1
+def _(bm_C, bm_best, df_runs, np, pd):
+    TARGET = 0.01                       # Within 1% of the optimum
+    _n_iter = df_runs.run.max() + 1     # Num iterations
 
-    _ok = (df_runs.weight <= bm_C) & (df_runs.profit >= (1 - TARGET) * bm_best)    # this run is a solution
-    runs_to_target = df_runs.run.where(_ok).groupby([df_runs[c] for c in _cfg]).min() + 1   # first solution, NaN: never
+    def first_hit(r):
+        """
+        Return number of runs until the first one that is within TARGET.
+        """
+        ok = (r.weight <= bm_C) &  (r.profit >= (1 - TARGET) * bm_best)
+        return r.run[ok].min() + 1 if ok.any() else np.inf
 
-    def tts99(r):
-        """Runs needed for a 99% chance of a solution, repeating the whole solve (λ from 0) with budget k; best k."""
-        k = np.arange(1, _n_iter + 1)
-        p = np.minimum((r.to_numpy()[:, None] <= k).mean(axis=0), 0.99)        # success probability within k runs
-        with np.errstate(divide='ignore'):
-            reps = np.where(p > 0, np.log(0.01) / np.log(1 - p), np.inf)       # repetitions needed for 99%
-        return (k * reps).min()
+    def tts99(hits):
+        """
+        Runs needed for a 99% chance of a solution
+        """
+        best = np.inf
+        for k in range(1, _n_iter + 1):
+            p = np.mean(hits <= k)
+            if p == 0:
+                continue
+            repeats = 1 if p >= 0.99 else np.log(0.01) / np.log(1 - p)
+            best = min(best, k * repeats)
+        return best
 
-    tts = runs_to_target.groupby(['P', 'n', 'init_size']).agg(
-        p_hit=lambda r: r.notna().mean(),
-        median_runs='median',
-        tts99=tts99,
-    )
+    _rows = []
+    for (_P, _n, _init_size), _cfg in df_runs.groupby(['P', 'n', 'init_size']):
+        _hits = np.array([first_hit(_r) for _, _r in _cfg.groupby('seed')])
+        _solved = _hits[_hits < np.inf]
+        _rows.append({
+            'P': _P,
+            'n': _n,
+            'init_size': _init_size,
+            'p_hit': len(_solved) / len(_hits),
+            'median_runs': np.median(_solved) if len(_solved) else np.nan,
+            'tts99': tts99(_hits),
+        })
+
+    tts = pd.DataFrame(_rows)
     tts.sort_values('tts99')
     return (TARGET,)
 
@@ -590,6 +613,8 @@ def _(TARGET, bm_C, bm_best, df_runs, plt):
         (0.05, 0.05, 10),
         (0.05, 0.05, 20),
         (0.05, 0.05, 40),
+        (0.05, 0.05, 60),
+        (0.05, 0.05, 80),
     ]
     _seed = 0
 
@@ -619,7 +644,6 @@ def _(TARGET, bm_C, bm_best, df_runs, plt):
     _ax[1, 0].legend()
     _fig.tight_layout()
     _fig
-
     return
 
 
