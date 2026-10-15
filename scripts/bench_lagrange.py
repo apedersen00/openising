@@ -2,15 +2,20 @@
 Benchmark the Lagrange solver on QKP instances.
 """
 
+import os
+os.environ['OMP_NUM_THREADS'] = '1'
+
 import itertools
 import sys
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from lagrange import knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
+from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
 
+WORKERS = 30
 EXPERIMENT = 'qkp_rule'
 N_ITER = 50
 SEEDS = 200
@@ -107,5 +112,6 @@ def run_instance(name):
 
 
 if __name__ == '__main__':
-    for name in sys.argv[1:]:
-        run_instance(name)
+    names = sys.argv[1:] or sorted((p.stem for p in BENCH.glob('jeu_*.txt')), reverse=True)
+    with Pool(WORKERS) as pool:
+        pool.map(run_instance, names)
