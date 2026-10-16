@@ -8,6 +8,7 @@
 **/no_backup
 *.pkl
 __marimo__
+data/qkp_rule
 
 # egg
 *.egg-info
