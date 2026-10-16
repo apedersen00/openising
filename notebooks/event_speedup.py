@@ -35,7 +35,7 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(mo.notebook_dir().parent / 'scripts'))
-    from lagrange import cluster_size, knapsack_to_qubo, load_qkp, max_field, paper_rule, qubo_to_ising, solver_event
+    from lagrange import cluster_size, knapsack_to_qubo, load_qkp, max_field, qubo_to_ising, solver_event
 
     return (
         cluster_size,
@@ -45,7 +45,6 @@ def _():
         mo,
         njit,
         np,
-        paper_rule,
         pd,
         plt,
         qubo_to_ising,
@@ -59,25 +58,26 @@ def _(mo):
     mo.md(r"""
     ## Problem
 
-    QKP with a squared penalty, P from the paper rule (Delacour 2025), no Lagrange term.
+    QKP with a fixed squared penalty λ = 100, the openising setting (max(profit) × weight_constant, clamped to 1).
     The Euler step is dt = 1 / max_field.
     """)
     return
 
 
 @app.cell
-def _(cluster_size, knapsack_to_qubo, load_qkp, max_field, np, paper_rule, qubo_to_ising):
+def _(cluster_size, knapsack_to_qubo, load_qkp, max_field, np, qubo_to_ising):
     NAME = 'jeu_100_25_1'
     N_ITER = 50                                     # multiplicative iterations (analog runs)
     SEED = 0
+    LAMBDA = 100.0                                  # penalty weight
+    STOP_CRITERION = 1e-10                          # from Paper_OpenIsing/Pareto_curve_OPS/config/pareto_curves_QKP.yaml
 
     w, P, C = load_qkp(NAME)
     Q_obj, Q_pen, _, a = knapsack_to_qubo(w, P, C)
     J_obj, h_obj, _ = qubo_to_ising(Q_obj)
     J_pen, h_pen, _ = qubo_to_ising(Q_pen)
-    P_pen, _ = paper_rule(P, a, C)
-    J = J_obj + P_pen * J_pen
-    h = h_obj + P_pen * h_pen
+    J = J_obj + LAMBDA * J_pen
+    h = h_obj + LAMBDA * h_pen
     n = len(h)
     dt = 1 / max_field(J, h)
 
@@ -88,7 +88,7 @@ def _(cluster_size, knapsack_to_qubo, load_qkp, max_field, np, paper_rule, qubo_
     clusters = np.zeros((N_ITER, n), dtype=np.int64)
     for _it in range(N_ITER):
         clusters[_it, :sizes[_it]] = rng.choice(n, size=sizes[_it], replace=False)
-    return J, N_ITER, clusters, dt, h, sizes, v0
+    return J, LAMBDA, N_ITER, STOP_CRITERION, clusters, dt, h, sizes, v0
 
 
 @app.cell(hide_code=True)
@@ -96,33 +96,40 @@ def _(mo):
     mo.md(r"""
     ## Forward Euler Solvers
 
-    `analog_fe` runs a fixed number of Euler steps. `analog_fe_njit` is the same function compiled with numba.
-    The outer loop is the same as `solver_event`.
+    `analog_fe` runs Euler steps until openising's convergence check passes (`Multiplicative.inner_loop_FE`) or `max_steps` is reached.
+    `analog_fe_njit` is the same function compiled with numba. The outer loop is the same as `solver_event`.
     """)
     return
 
 
 @app.cell
 def _(njit, np):
-    def analog_fe(J, h, v, dt, n_steps):
-        for _ in range(n_steps):
-            v = np.clip(v + dt * (J @ np.sign(v) + h), -1.0, 1.0)
-        return np.where(v >= 0, 1.0, -1.0)             # a spin at 0 counts as +1, like in analog_event
+    def analog_fe(J, h, v, dt, max_steps, stop_criterion):
+        i = 0
+        max_change = np.inf
+        while i < max_steps and max_change > stop_criterion:
+            s = np.sign(v)
+            v_new = np.clip(v + dt * (J @ s + h), -1.0, 1.0)
+            if i > 0 and i % 10 == 0:                   # openising: every 10 steps, compare the voltages to the previous signs
+                max_change = np.max(np.abs(v_new - s)) / np.linalg.norm(s)
+            v = v_new
+            i += 1
+        return np.where(v >= 0, 1.0, -1.0), i          # a spin at 0 counts as +1, like in analog_event
 
     analog_fe_njit = njit(analog_fe)
 
-    def multiplicative_fe(analog, J, h, v, sizes, clusters, dt, n_steps):
+    def multiplicative_fe(analog, J, h, v, sizes, clusters, dt, max_steps, stop_criterion):
         n_iter = len(sizes)
-        history = np.empty((n_iter, 2))                 # energy, best energy
+        history = np.empty((n_iter, 3))                 # energy, best energy, Euler steps
         states = np.zeros((n_iter, len(h)))             # end state of every run
         best_sigma, best_E = None, np.inf
         for it in range(n_iter):
-            sigma = analog(J, h, v, dt, n_steps)
+            sigma, steps = analog(J, h, v, dt, max_steps, stop_criterion)
             states[it] = sigma
             E = -0.5 * sigma @ J @ sigma - h @ sigma
             if E < best_E:
                 best_sigma, best_E = sigma.copy(), E
-            history[it] = E, best_E
+            history[it] = E, best_E, steps
             v = best_sigma.copy()
             v[clusters[it, :sizes[it]]] *= -1
         return best_sigma, best_E, history, states
@@ -136,33 +143,18 @@ def _(mo):
     ## Number of Euler Steps
 
     The event solver returns the settle time T of every run, so T / dt is the number of Euler steps that run needs.
-    The njit solver is then swept over the number of steps to find where its runs end in the same states as the event solver.
+    The largest one is the step cap of the Euler solvers.
     """)
     return
 
 
 @app.cell
-def _(J, N_ITER, analog_fe_njit, clusters, dt, h, multiplicative_fe, np, pd, sizes, solver_event, v0):
+def _(J, N_ITER, clusters, dt, h, np, sizes, solver_event, v0):
     _, _, hist_event, states_event = solver_event(J, h, v0.copy(), N_ITER, sizes, clusters, 10**6)
     steps_needed = hist_event[:, 2] / dt
-    print(f'Euler steps to settle: median {np.median(steps_needed):.0f}, max {steps_needed.max():.0f}')
-
-    def sweep_steps(step_counts):
-        rows = []
-        for n_steps in step_counts:
-            *_, states = multiplicative_fe(analog_fe_njit, J, h, v0, sizes, clusters, dt, n_steps)
-            rows.append(dict(n_steps=n_steps, runs_matching=(states == states_event).all(axis=1).sum()))
-        return pd.DataFrame(rows)
-
-    sweep = sweep_steps([1_000, 2_000, 4_000, 8_000, 16_000])
-    sweep
-    return (states_event,)
-
-
-@app.cell
-def _():
-    N_STEPS = 8_000                                 # from the sweep above: all runs match from 8000 steps
-    return (N_STEPS,)
+    N_STEPS = int(np.ceil(steps_needed.max()))
+    print(f'Euler steps to settle: median {np.median(steps_needed):.0f}, max {N_STEPS}')
+    return N_STEPS, states_event
 
 
 @app.cell(hide_code=True)
@@ -178,13 +170,13 @@ def _(
     J,
     N_ITER,
     N_STEPS,
+    STOP_CRITERION,
     analog_fe,
     analog_fe_njit,
     clusters,
     dt,
     h,
     multiplicative_fe,
-    np,
     pd,
     sizes,
     solver_event,
@@ -193,11 +185,12 @@ def _(
     v0,
 ):
     solvers = {
-        'basic' : lambda: multiplicative_fe(analog_fe, J, h, v0, sizes, clusters, dt, N_STEPS),
-        'njit'  : lambda: multiplicative_fe(analog_fe_njit, J, h, v0, sizes, clusters, dt, N_STEPS),
+        'basic' : lambda: multiplicative_fe(analog_fe, J, h, v0, sizes, clusters, dt, N_STEPS, STOP_CRITERION),
+        'njit'  : lambda: multiplicative_fe(analog_fe_njit, J, h, v0, sizes, clusters, dt, N_STEPS, STOP_CRITERION),
         'event' : lambda: solver_event(J, h, v0.copy(), N_ITER, sizes, clusters, 10**6),
     }
-    REPEATS = {'basic': 3, 'njit': 5, 'event': 50}  # min over repeats drops the numba compile of the first call
+    REPEATS = {'basic': 1, 'njit': 1, 'event': 50}  # the Euler solvers take minutes, the event solver milliseconds
+    analog_fe_njit(J, h, v0.copy(), dt, 1, STOP_CRITERION)  # compile before timing
 
     def time_per_iteration(solve, repeats):
         times = []
@@ -219,7 +212,7 @@ def _(
 
 
 @app.cell
-def _(N_STEPS, np, plt, timing):
+def _(LAMBDA, np, plt, timing):
     def plot_speedup(timing):
         INK, INK_2, MUTED, GRID, AXIS, BAR, SURFACE = (
             '#0b0b0b', '#52514e', '#898781', '#e1e0d9', '#c3c2b7', '#2a78d6', '#fcfcfb')
@@ -249,7 +242,7 @@ def _(N_STEPS, np, plt, timing):
         for side in ('top', 'right', 'left'):
             ax.spines[side].set_visible(False)
         ax.spines['bottom'].set_color(AXIS)
-        ax.set_title(f'Speed-up over basic Forward Euler (time per iteration, {N_STEPS:,} Euler steps)',
+        ax.set_title(f'Speed-up over basic Forward Euler (time per iteration, λ = {LAMBDA:g})',
                      loc='left', color=INK, fontsize=11)
         fig.tight_layout()
         return fig
