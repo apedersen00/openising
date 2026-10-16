@@ -17,7 +17,7 @@ from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplica
 
 WORKERS = 30
 EXPERIMENT = 'qkp_rule'
-N_ITER = 50
+N_ITER = 200
 SEEDS = 200
 
 # Common for all runs
@@ -33,8 +33,8 @@ COMMON = {
 GRIDS = [
     {
         'update'    : ['plain'],
-        'P_factor'  : [0.25, 0.5, 1, 2, 4, 8],
-        'n_factor'  : [0.25, 0.5, 1, 2, 4, 8, 16]
+        'P_factor'  : [0.25, 0.5, 1, 2, 4, 8, 16, 32],
+        'n_factor'  : [0.25, 0.5, 1, 2, 4, 8, 16, 64, 256]
     },
     {
         'update'    : ['plain'],
