@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.24.2"
+__generated_with = "0.25.1"
 app = marimo.App()
 
 
@@ -689,7 +689,7 @@ def _(cluster_size, njit, np):
             clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
         return solver_event(J, h, v, n_iter, sizes, clusters, max_events)
 
-    return (multiplicative_event,)
+    return
 
 
 @app.cell
@@ -698,7 +698,7 @@ def _(
     SEED,
     knapsack_to_qubo,
     max_field,
-    multiplicative_event,
+    multiplicative_solver,
     np,
     plt,
     qkp_profit,
@@ -736,10 +736,10 @@ def _(
 
     _dt = 1 / max_field(bm_J, bm_h)
 
-    N_STEPS = 1000000
+    N_STEPS = 10000
 
-    _best_sigma, _best_E, _history, _states = multiplicative_event(
-        bm_J, bm_h, n_iter=100, init_size=20, end_size=1, seed=SEED
+    _best_sigma, _best_E, _history, _states = multiplicative_solver(
+        bm_J, bm_h, n_steps=N_STEPS, dt=_dt, n_iter=50, init_size=20, end_size=1, seed=SEED
     )
 
     _z = (1 + _best_sigma) / 2
@@ -752,6 +752,7 @@ def _(
 
     _ax.plot(_history[:, 0] + bm_c, label='energy of this run')
     _ax.plot(_history[:, 1] + bm_c, label='best energy')
+    _ax.axhline(-18000, color='black', linestyle='--')
     _ax.set_xlabel('iteration')
     _ax.set_ylabel('energy')
     _ax.legend()

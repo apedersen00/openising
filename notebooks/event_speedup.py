@@ -225,9 +225,10 @@ def _(LAMBDA, np, plt, timing):
         ax.axvline(1, color=AXIS, linewidth=1)
 
         ax.set_xscale('log')
-        ticks = [10.0**k for k in range(int(np.log10(s.speedup.max())) + 2)]
+        ks = range(int(np.log10(s.speedup.max())) + 2)
+        ticks = [10.0**k for k in ks]
         ax.set_xlim(1, ticks[-1])
-        ax.set_xticks(ticks, labels=[f'{t:g}×' for t in ticks])
+        ax.set_xticks(ticks, labels=[f'{10**k:,}×' if k < 4 else f'$10^{{{k}}}$×' for k in ks])
         ax.minorticks_off()
         ax.grid(axis='x', color=GRID, linewidth=1)
         ax.set_axisbelow(True)
