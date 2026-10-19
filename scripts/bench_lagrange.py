@@ -16,13 +16,13 @@ import pandas as pd
 from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
 
 WORKERS = 30
-EXPERIMENT = 'qkp_rule'
+EXPERIMENT = 'qkp_adam_momentum'
 N_ITER = 200
 SEEDS = 200
 
 # Common for all runs
 COMMON = {
-    'init_frac' : [0.4, 0.8],   # fraction of spins in initial cluster size
+    'init_frac' : [0.8],   # fraction of spins in initial cluster size
     'end_frac'  : [0.0625],     # fraction of spins in final cluster size
     'exponent'  : [0.0],        # 0 = linear decay
     'beta1'     : [0.9],        # used by momentum and adam
@@ -32,14 +32,14 @@ COMMON = {
 # Parametric, all possible combinations will be run
 GRIDS = [
     {
-        'update'    : ['plain'],
-        'P_factor'  : [0.25, 0.5, 1, 2, 4, 8, 16, 32],
-        'n_factor'  : [0.25, 0.5, 1, 2, 4, 8, 16, 64, 256]
+        'update'    : ['plain', 'momentum'],
+        'P_factor'  : [4, 8, 16, 32],
+        'n_factor'  : [16, 64, 256, 1024, 4096]
     },
     {
-        'update'    : ['plain'],
-        'P_factor'  : [64, 256, 1024, 4096, 16384],
-        'n_factor'  : [0]
+        'update'    : ['adam'],
+        'P_factor'  : [4, 8, 16, 32],
+        'n_factor'  : [0.3, 1, 3, 10, 30]
     },
 ]
 
@@ -65,6 +65,7 @@ def run_instance(name):
     results = []
     for setting in settings():
         for seed in range(SEEDS):
+            eta = setting['n_factor'] * (1.0 if setting['update'] == 'adam' else n_rule)
             states, lambdas = multiplicative_lagrange(
                 J_obj,
                 h_obj,
@@ -73,7 +74,7 @@ def run_instance(name):
                 a,
                 C,
                 P=setting['P_factor'] * P_rule,
-                eta=setting['n_factor'] * n_rule,
+                eta=eta,
                 n_iter=N_ITER,
                 init_size=int(setting['init_frac'] * len(a)),
                 end_size=int(setting['end_frac'] * len(a)),
@@ -93,7 +94,7 @@ def run_instance(name):
                 'instance': name,
                 **setting,
                 'P': setting['P_factor'] * P_rule,
-                'n': setting['n_factor'] * n_rule,
+                'n': eta,
                 'seed': seed,
                 'run': np.arange(N_ITER),
                 'gap': np.where(feasible, 1 - profit / best, 1.0),
