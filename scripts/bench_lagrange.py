@@ -16,8 +16,8 @@ import pandas as pd
 from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
 
 WORKERS = 30
-EXPERIMENT = 'qkp_adam_momentum'
-N_ITER = 200
+EXPERIMENT = 'qkp_momentum_sweep'
+N_ITER = 50
 SEEDS = 200
 
 # Common for all runs
@@ -25,21 +25,22 @@ COMMON = {
     'init_frac' : [0.8],   # fraction of spins in initial cluster size
     'end_frac'  : [0.0625],     # fraction of spins in final cluster size
     'exponent'  : [0.0],        # 0 = linear decay
-    'beta1'     : [0.9],        # used by momentum and adam
     'beta2'     : [0.999],      # used by adam
 }
 
 # Parametric, all possible combinations will be run
 GRIDS = [
     {
-        'update'    : ['plain', 'momentum'],
+        'update'    : ['plain'],
+        'beta1'     : [0.0],
         'P_factor'  : [4, 8, 16, 32],
         'n_factor'  : [16, 64, 256, 1024, 4096]
     },
     {
-        'update'    : ['adam'],
+        'update'    : ['momentum', 'momentum_bc'],
+        'beta1'     : [0.5, 0.75, 0.875],
         'P_factor'  : [4, 8, 16, 32],
-        'n_factor'  : [0.3, 1, 3, 10, 30]
+        'n_factor'  : [16, 64, 256, 1024, 4096]
     },
 ]
 

@@ -220,6 +220,9 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
         if update == 'momentum':
             m = beta1 * m + (1 - beta1) * g
             lam += eta * m
+        elif update == 'momentum_bc':
+            m = beta1 * m + (1 - beta1) * g
+            lam += eta * m / (1 - beta1**(it + 1))
         elif update == 'adam':
             m = beta1 * m + (1 - beta1) * g
             s2 = beta2 * s2 + (1 - beta2) * g**2
