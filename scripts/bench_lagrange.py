@@ -2,7 +2,7 @@
 Benchmark the Lagrange solver on QKP instances.
 
 Output in data/<EXPERIMENT>/:
-    meta.json               git commit, date, seeds, budgets and instances of the run
+    meta.json               commit hash, date, seeds etc.
     settings.csv            one row per setting, the row number is the setting's index in the arrays
     n<budget>/<name>.npz    gap, feasible, lam, penalty: arrays of shape (setting, seed, run)
                             P, eta: the P and η each setting used on this instance
@@ -24,61 +24,62 @@ import pandas as pd
 
 from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
 
-WORKERS = 30
-EXPERIMENT = 'qkp_mega'
-BUDGETS = [50, 200]     # runs per seed; the cluster size shrinks over the whole budget, so each budget is its own run
-SEEDS = 200
-BAD = {'jeu_100_100_4', 'jeu_200_25_3', 'jeu_300_25_3'}     # benchmark files that are copies of other instances
+WORKERS = 30                                                # number of cores
+EXPERIMENT = 'qkp_sweep'
+BUDGETS = [50, 200]                                         # number of iterations
+SEEDS = 200                                                 # Number of seeds per run
+BAD = {'jeu_100_100_4', 'jeu_200_25_3', 'jeu_300_25_3'}     # Bad benchmarks to skip
 
 ROOT = Path(__file__).parent.parent
 OUT = ROOT / 'data' / EXPERIMENT
 
 # Common for all runs
 COMMON = {
-    'init_frac' : [0.8],   # fraction of spins in initial cluster size
+    'init_frac' : [0.8],        # fraction of spins in initial cluster size
     'end_frac'  : [0.0625],     # fraction of spins in final cluster size
     'exponent'  : [0.0],        # 0 = linear decay
     'beta2'     : [0.999],      # used by adam
 }
 
-# P = P_factor × the paper's P (2dN). Every grid sets η with one of three keys:
-#   'r'         η = r·P, the ratio that sets stability, the same on every instance
-#   'n_factor'  η = n_factor × the paper's η (20)
-#   'eta'       η as an absolute value
+# P = P_factor * 2dN (paper).
+# n can be set with one of three keys:
+#   - 'r'       : η = r*P, r is a ratio
+#   - 'n_factor': η = n_factor * 20, some scalar of the papers n = 20
+#   - 'eta'     : η as an absolute value
 P_FACTORS = [1, 2, 4, 8, 16, 32, 64]
 RATIOS    = [1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16, 32, 64]
 
 # Parametric, all possible combinations will be run
 GRIDS = [
-    {   # penalty only: η = 0 keeps λ at 0
+    {   # penalty only
         'update'    : ['plain'],
         'beta1'     : [0.0],
         'P_factor'  : [64, 256, 1024, 4096, 16384],
         'eta'       : [0.0],
     },
-    {
+    {   # lagrange, scale n by ratio
         'update'    : ['plain'],
         'beta1'     : [0.0],
         'P_factor'  : P_FACTORS,
         'r'         : RATIOS,
     },
-    {
+    {   # lagrange w/ momentun, scale n by ratio
         'update'    : ['momentum', 'momentum_bc'],
         'beta1'     : [0.5, 0.75, 0.875],
         'P_factor'  : P_FACTORS,
         'r'         : RATIOS,
     },
-    {   # adam divides its step by the size of g, so λ moves about η per run whatever P is
+    {   # lagrange w/ adam
         'update'    : ['adam'],
         'beta1'     : [0.5, 0.9],
         'P_factor'  : P_FACTORS,
         'eta'       : [0.3, 1, 3, 10, 30],
     },
-    # Anchors: the paper's settings and the best settings of the old sweeps (to check they reproduce)
-    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [1],  'n_factor': [1]},      # paper text
-    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [4],  'n_factor': [4]},      # paper code (spin form)
-    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [8],  'n_factor': [64]},     # best in qkp_rule
-    {'update': ['momentum'], 'beta1': [0.5], 'P_factor': [16], 'n_factor': [256]},    # best in qkp_momentum_sweep
+    # Some fixed runs that gave good results previously
+    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [1],  'n_factor': [1]},
+    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [4],  'n_factor': [4]},
+    {'update': ['plain'],    'beta1': [0.0], 'P_factor': [8],  'n_factor': [64]},
+    {'update': ['momentum'], 'beta1': [0.5], 'P_factor': [16], 'n_factor': [256]},
 ]
 
 
