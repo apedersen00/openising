@@ -62,13 +62,20 @@ def qkp_profit(x, P):
     return profit
 
 
-def paper_rule(P, a, C):
+def paper_rule(profit, a, C):
     """
-    P and n from Delacour 2025: P = 2dN and n = 20 after dividing the profits by their max
-    and the weights by max(a, C). Returned in our (not divided) units.
+    P and n from Delacour 2025: P = 2dN and n = 20.
+
+    The paper rescales all problems so the largest profit is 1
+    and the capacity is 1.
+
+    Args:
+        - profit: profit matrix for the QKP problem
+        - a: item weights with binary slack appended
+        - C: capacity
     """
-    d = np.mean(P[~np.eye(len(P), dtype=bool)] != 0)          # density of the pair profits
-    scale = np.abs(P).max() / max(np.abs(a).max(), C)**2
+    d = np.mean(profit[~np.eye(len(profit), dtype=bool)] != 0)  # density of all couplings
+    scale = np.abs(profit).max() / max(np.abs(a).max(), C)**2   # Rescale
     return 2 * d * len(a) * scale, 20 * scale
 
 
