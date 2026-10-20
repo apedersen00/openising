@@ -9,6 +9,7 @@
 *.pkl
 __marimo__
 data/qkp_rule
+data/qkp_sweep
 
 # egg
 *.egg-info
