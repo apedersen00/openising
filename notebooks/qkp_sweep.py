@@ -287,7 +287,7 @@ def _(mo):
 def _(Path, names, pd, plain, plt):
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
-    from lagrange import load_optimum, load_qkp
+    from qkp import load_optimum, load_qkp
 
     price = pd.Series({_name: load_optimum(_name) / load_qkp(_name)[2] for _name in names})   # best profit per unit of capacity
 

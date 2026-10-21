@@ -1,44 +1,5 @@
-from pathlib import Path
-
 import numpy as np
 from numba import njit
-
-BENCH = Path(__file__).parent.parent / 'ising/benchmarks/Knapsack'
-
-
-# ---------- QKP problem ----------
-
-def load_qkp(name):
-    lines = (BENCH / f'{name}.txt').read_text().splitlines()
-    n = int(lines[1])
-    P = np.diag(np.array(lines[2].split(), dtype=float))
-    for i in range(n - 1):
-        row = np.array(lines[3 + i].split(), dtype=float)
-        P[i, i+1:] = row
-        P[i+1:, i] = row
-    C = int(lines[n + 4])
-    w = np.array(lines[n + 5].split(), dtype=float)
-    return w, P, C
-
-
-def load_optimum(name):
-    for line in (BENCH / 'optimal_energy.txt').read_text().splitlines():
-        parts = line.split()
-        if parts and parts[0] == name:
-            return float(parts[1])
-
-
-def knapsack_to_qubo(w, P, C):
-    n_items = len(w)                                            # Number of items
-    B = int(np.floor(np.log2(C)) + 1)                           # Number of slack bits
-    a = np.concatenate([w, 2.0 ** np.arange(B)])                # Slack bit vector e.g. [1, 2, 4, 8] appended to w
-                                                                # sum(w_i, x_i) + y = C -> sum(a_i, x_i) = C
-    n = len(a)
-    Q_obj = np.zeros((n, n))                                    # Define Q, we want x^T Q x = -profit for minimization
-    Q_obj[:n_items, :n_items] = -P / 2                          # Half all values
-    np.fill_diagonal(Q_obj[:n_items, :n_items], -np.diag(P))    # Put back the original diagonal
-    Q_pen = np.outer(a, a) - 2 * C * np.diag(a)
-    return Q_obj, Q_pen, C**2, a
 
 
 def qubo_to_ising(Q):
@@ -49,34 +10,31 @@ def qubo_to_ising(Q):
     return J, h, c
 
 
+def penalty_qubo(A, b):
+    """
+    ||Az - b||^2 as a QUBO, without the constant b^T b. z is binary, so z_i^2 = z_i puts the linear term on the diagonal.
+    """
+    return A.T @ A - 2 * np.diag(A.T @ b)
+
+
 def max_field(J, h):
     return np.max(np.abs(J).sum(axis=1) + np.abs(h))
 
 
-@njit
-def qkp_profit(x, P):
-    profit = 0.0
-    for i in range(len(x)):                         # same as x @ np.triu(P) @ x, without building np.triu(P)
-        for j in range(i, len(x)):
-            profit += P[i, j] * x[i] * x[j]
-    return profit
-
-
-def paper_rule(profit, a, C):
+def paper_rule(W, A, b):
     """
     P and n from Delacour 2025: P = 2dN and n = 20.
 
-    The paper rescales all problems so the largest profit is 1
-    and the capacity is 1.
+    The paper rescales the objective so its largest value is 1,
+    and the constraints so the largest of A and b is 1.
 
     Args:
-        - profit: profit matrix for the QKP problem
-        - a: item weights with binary slack appended
-        - C: capacity
+        - W: objective matrix (the profit matrix for QKP)
+        - A, b: constraints A z = b, slack bits included
     """
-    d = np.mean(profit[~np.eye(len(profit), dtype=bool)] != 0)  # density of all couplings
-    scale = np.abs(profit).max() / max(np.abs(a).max(), C)**2   # Rescale
-    return 2 * d * len(a) * scale, 20 * scale
+    d = np.mean(W[~np.eye(len(W), dtype=bool)] != 0)  # density of all couplings
+    scale = np.abs(W).max() / max(np.abs(A).max(), np.abs(b).max())**2   # Rescale
+    return 2 * d * A.shape[1] * scale, 20 * scale
 
 
 # ---------- Cluster sizes ----------
@@ -188,17 +146,12 @@ def energy(s, J, h):
 
 
 @njit
-def qkp_penalty(a, sigma, C):
-    return a.T @ ((1 + sigma) / 2) - C
-
-
-@njit
-def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events, update, beta1, beta2):
+def solver_lagrange(J_obj, h_obj, J_pen, h_pen, A, b, P, eta, v, sizes, clusters, max_events, update, beta1, beta2):
     """
     Args:
         - J_obj, h_obj: f in Ising form
         - J_pen, h_pen: ||g||^2 in Ising form
-        - a, C: the extended A and C
+        - A, b: constraints A z = b, slack bits included
         - P, eta: P and n of the algorithm
         - v, sizes, cluster: multiplicative solver's start voltages and cluster size
     """
@@ -206,13 +159,13 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
     n = len(h_obj)
     J = J_obj + P * J_pen                               # Compute the J
     states = np.zeros((n_iter, n))                      # end state of every run
-    lams = np.zeros(n_iter)                             # lambdas for every run
+    lams = np.zeros((n_iter, len(b)))                   # lambdas for every run, one per constraint
     winner = np.zeros(n)                                # winner: the state we perturb on next iteration
-    lam = 0.0                                           # Current lambda (lambda_0 = 0 from algorithm)
-    m = 0.0                                             # running average of g (momentum)
-    s2 = 0.0                                            # running average of g**2 (adam)
+    lam = np.zeros(len(b))                              # Current lambdas (lambda_0 = 0 from algorithm)
+    m = np.zeros(len(b))                                # running average of g (momentum)
+    s2 = np.zeros(len(b))                               # running average of g**2 (adam)
     for it in range(n_iter):                            # Do K iterations
-        h = h_obj + P * h_pen - lam * a / 2             # Add the Lagrange term (only affects bias)
+        h = h_obj + P * h_pen - lam @ A / 2             # Add the Lagrange term (only affects bias)
         sigma, T, _ = analog_event(J, h, v, max_events) # Run the typical solver
         states[it] = sigma
         lams[it] = lam
@@ -223,7 +176,7 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
         elif energy(sigma, J, h) < energy(winner, J, h):
             winner = sigma.copy()
 
-        g = qkp_penalty(a, sigma, C)
+        g = A @ ((1 + sigma) / 2) - b                   # constraint violation, one per constraint
         if update == 'momentum':
             m = beta1 * m + (1 - beta1) * g
             lam += eta * m
@@ -243,7 +196,7 @@ def solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters
     return states, lams
 
 
-def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, init_size, end_size, seed, max_events=10**6, exponent=0.0, update='plain', beta1=0.9, beta2=0.999):
+def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, A, b, P, eta, n_iter, init_size, end_size, seed, max_events=10**6, exponent=0.0, update='plain', beta1=0.9, beta2=0.999):
     rng = np.random.default_rng(seed)
     n = len(h_obj)
     v = rng.uniform(-1, 1, n)
@@ -256,4 +209,4 @@ def multiplicative_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, n_iter, in
     clusters = np.zeros((n_iter, n), dtype=np.int64)                                            # Array of which spins in each cluster
     for it in range(n_iter):
         clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
-    return solver_lagrange(J_obj, h_obj, J_pen, h_pen, a, C, P, eta, v, sizes, clusters, max_events, update, beta1, beta2)
+    return solver_lagrange(J_obj, h_obj, J_pen, h_pen, A, b, P, eta, v, sizes, clusters, max_events, update, beta1, beta2)

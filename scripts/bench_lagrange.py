@@ -22,7 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from lagrange import BENCH, knapsack_to_qubo, load_optimum, load_qkp, multiplicative_lagrange, qkp_profit, qubo_to_ising, paper_rule
+from lagrange import multiplicative_lagrange, paper_rule, penalty_qubo, qubo_to_ising
+from qkp import BENCH, knapsack_to_qubo, load_optimum, load_qkp, qkp_profit
 
 WORKERS = 30                                                # number of cores
 EXPERIMENT = 'qkp_sweep'
@@ -110,10 +111,10 @@ def step_size(setting, P, n_rule):
 def run_instance(name, n_iter):
     w, P, C = load_qkp(name)
     best = load_optimum(name)
-    Q_obj, Q_pen, _, a = knapsack_to_qubo(w, P, C)
+    Q_obj, A, b = knapsack_to_qubo(w, P, C)
     J_obj, h_obj, _ = qubo_to_ising(Q_obj)
-    J_pen, h_pen, _ = qubo_to_ising(Q_pen)
-    P_rule, n_rule = paper_rule(P, a, C)
+    J_pen, h_pen, _ = qubo_to_ising(penalty_qubo(A, b))
+    P_rule, n_rule = paper_rule(P, A, b)
 
     shape = (len(SETTINGS), SEEDS, n_iter)
     gap      = np.zeros(shape, dtype=np.float32)
@@ -132,13 +133,13 @@ def run_instance(name, n_iter):
                 h_obj,
                 J_pen,
                 h_pen,
-                a,
-                C,
+                A,
+                b,
                 P=Ps[i],
                 eta=etas[i],
                 n_iter=n_iter,
-                init_size=int(setting['init_frac'] * len(a)),
-                end_size=int(setting['end_frac'] * len(a)),
+                init_size=int(setting['init_frac'] * A.shape[1]),
+                end_size=int(setting['end_frac'] * A.shape[1]),
                 seed=seed,
                 exponent=setting['exponent'],
                 update=setting['update'],
@@ -152,8 +153,8 @@ def run_instance(name, n_iter):
 
             feasible[i, seed] = x @ w <= C
             gap[i, seed] = np.where(feasible[i, seed], 1 - profit / best, 1.0)
-            lam[i, seed] = lambdas
-            penalty[i, seed] = z @ a - C
+            lam[i, seed] = lambdas[:, 0]                # QKP has one constraint
+            penalty[i, seed] = z @ A[0] - b[0]
 
     np.savez(OUT / f'n{n_iter}' / f'{name}.npz', gap=gap, feasible=feasible, lam=lam, penalty=penalty, P=Ps, eta=etas)
     print(f'{name} n{n_iter}: done', flush=True)
