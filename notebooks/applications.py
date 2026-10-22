@@ -15,14 +15,20 @@ def _():
     from numba import njit
     import marimo as mo
 
+    from scipy.optimize import linprog
+
     sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
     from lagrange import multiplicative_lagrange, penalty_qubo, qubo_to_ising
-    from mkp import BENCH, load_mkp, mkp_to_qubo, mkp_optimum
+    from mkp import BENCH, load_mkp, mkp_to_qubo, mkp_optimum, load_best, mkp_rule
 
     return (
         BENCH,
+        linprog,
+        load_best,
         load_mkp,
         mkp_optimum,
+        mkp_rule,
+        mkp_to_qubo,
         mo,
         multiplicative_lagrange,
         np,
@@ -218,6 +224,50 @@ def _(BENCH, load_mkp, mkp_optimum, mo):
         _f.write('# name k value gap. scipy.optimize.milp (HiGHS); gap 0 = proven optimal, else stopped after 300 s\n')
         for (_name, _k), (_value, _gap) in zip(_jobs, _results):
             _f.write(f'{_name} {_k} {_value:.10g} {_gap:.2g}\n')
+    return
+
+
+@app.cell
+def _(
+    linprog,
+    load_best,
+    load_mkp,
+    mkp_rule,
+    mkp_to_qubo,
+    multiplicative_lagrange,
+    np,
+    penalty_qubo,
+    plt,
+    qubo_to_ising,
+):
+    _p, _W, _C = load_mkp('mknapcb1', 0)
+    _Q_obj, _A, _b = mkp_to_qubo(_p, _W, _C)
+    _J_obj, _h_obj, _ = qubo_to_ising(_Q_obj)
+    _J_pen, _h_pen, _ = qubo_to_ising(penalty_qubo(_A, _b))
+    _n, _N = _A.shape[1], len(_p)
+    _P, _eta_paper = mkp_rule(_p, _A, _b)
+    _lp_price = -linprog(-_p, A_ub=_W, b_ub=_C, bounds=(0, 1)).ineqlin.marginals   # profit per extra unit of capacity, items fractional
+    _best = load_best('mknapcb1', 0)
+
+    fig_real, ax = plt.subplots(2, 2, sharex=True, sharey='row', figsize=(10, 6))
+    for _col, (_label, _eta) in enumerate([('paper η', _eta_paper), ('η = 2P', 2 * _P)]):
+        _states, _lams = multiplicative_lagrange(_J_obj, _h_obj, _J_pen, _h_pen, _A, _b, P=_P, eta=_eta, n_iter=200,
+                                                    init_size=int(0.8 * _n), end_size=int(0.0625 * _n), seed=0)
+        _x = (1 + _states[:, :_N]) / 2                  # items only
+        _profit = _x @ _p
+        _feasible = np.all(_x @ _W.T <= _C, axis=1)
+        ax[0, _col].plot(_profit, 'k.', ms=3)
+        ax[0, _col].plot(np.where(~_feasible)[0], _profit[~_feasible], 'r.', ms=3, label='infeasible')
+        ax[0, _col].axhline(_best, ls='--', c='gray', label='optimum')
+        ax[0, _col].set_title(f'{_label}: {_feasible.sum()} feasible, best {_profit[_feasible].max(initial=0):.0f}')
+        for _i, _price in enumerate(_lp_price):
+            ax[1, _col].plot(_lams[:, _i], c=f'C{_i}', lw=1)
+            ax[1, _col].axhline(_price, c=f'C{_i}', ls='--', lw=1)
+        ax[1, _col].set_xlabel('run')
+    ax[0, 0].set_ylabel('profit')
+    ax[0, 0].legend()
+    ax[1, 0].set_ylabel('$\\lambda$ (dashed: LP price)')
+    fig_real
     return
 
 
