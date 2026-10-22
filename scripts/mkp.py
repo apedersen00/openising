@@ -46,3 +46,23 @@ def mkp_optimum(p, W, C, time_limit=None):
     res = milp(-p, constraints=LinearConstraint(W, -np.inf, C), integrality=np.ones(len(p)), bounds=Bounds(0, 1),
                options={'time_limit': time_limit, 'mip_rel_gap': 0})
     return -res.fun, res.mip_gap
+
+
+def load_best(name, k):
+    """
+    Best value of an instance from best_values.txt (see the gap column there: 0 = proven optimal).
+    """
+    for line in (BENCH / 'best_values.txt').read_text().splitlines():
+        parts = line.split()
+        if parts[:2] == [name, str(k)]:
+            return float(parts[2])
+
+
+def mkp_rule(p, A, b):
+    """
+    P = 5dN and η = 0.05 from Delacour 2025 (Table I), in our units.
+    MKP has no couplings, so the paper sets d = 2/(N+1), which makes P ~= 10 before scaling.
+    """
+    N = A.shape[1]
+    scale = np.abs(p).max() / max(np.abs(A).max(), np.abs(b).max())**2
+    return 5 * 2 / (N + 1) * N * scale, 0.05 * scale
