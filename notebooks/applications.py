@@ -17,8 +17,19 @@ def _():
 
     sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
     from lagrange import multiplicative_lagrange, penalty_qubo, qubo_to_ising
+    from mkp import BENCH, load_mkp, mkp_to_qubo, mkp_optimum
 
-    return mo, multiplicative_lagrange, np, penalty_qubo, plt, qubo_to_ising
+    return (
+        BENCH,
+        load_mkp,
+        mkp_optimum,
+        mo,
+        multiplicative_lagrange,
+        np,
+        penalty_qubo,
+        plt,
+        qubo_to_ising,
+    )
 
 
 @app.cell(hide_code=True)
@@ -178,6 +189,35 @@ def _(lams, np, plt, run_feasible, run_profit):
     ax[1].set_xlabel('run')
     ax[1].set_ylabel('$\\lambda$')
     fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Real Benchmarks and optima
+    """)
+    return
+
+
+@app.cell
+def _(BENCH, load_mkp, mkp_optimum, mo):
+    from multiprocessing import Pool
+
+    mo.stop((BENCH / 'best_values.txt').exists(), mo.md('`best_values.txt` exists, delete it to recompute'))
+
+    _files = ['mknap1'] + [f'mknapcb{i}' for i in range(1, 10)]
+    _jobs = [(name, k) for name in _files for k in range(7 if name == 'mknap1' else 30)]           # 277 instances
+    _fits = ['mknap1', 'mknapcb1', 'mknapcb4']                                                    # near 256 spins: solve to the end
+    _args = [(*load_mkp(name, k), None if name in _fits else 300) for name, k in _jobs]           # p, W, C, time limit [s]
+
+    with Pool(20) as _pool:
+        _results = _pool.starmap(mkp_optimum, _args)                                              # one instance per core
+
+    with open(BENCH / 'best_values.txt', 'w') as _f:
+        _f.write('# name k value gap. scipy.optimize.milp (HiGHS); gap 0 = proven optimal, else stopped after 300 s\n')
+        for (_name, _k), (_value, _gap) in zip(_jobs, _results):
+            _f.write(f'{_name} {_k} {_value:.10g} {_gap:.2g}\n')
     return
 
 
