@@ -220,12 +220,14 @@ def _(dnx):
 
 
 @app.cell
-def _(MaxcutParserStage, TOP, busclique, minorminer, nx, wu_chip, wu_four):
+def _(busclique, minorminer, nx, wu_chip, wu_four):
     import sys
     import pandas as pd
     from ising.stages.tsp_parser_stage import TSPParserStage
     from ising.stages.mimo_parser_stage import MIMOParserStage
+    from ising.stages.maxcut_parser_stage import MaxcutParserStage
     from ising.generators.TSP import TSP
+    from ising.stages import TOP
     sys.path.insert(0, str(TOP / 'scripts'))
     from qkp import load_qkp, knapsack_to_qubo
 
@@ -294,7 +296,31 @@ def _(MaxcutParserStage, TOP, busclique, minorminer, nx, wu_chip, wu_four):
         })
         print(f'done: {_name}')
 
-    pd.DataFrame(_rows)
+    bench_table = pd.DataFrame(_rows)
+    bench_table.to_csv(TOP / 'data/pegasus_embedding.csv', index=False)
+    bench_table
+    return TOP, pd
+
+
+@app.cell
+def _(TOP, pd, plt):
+    from pathlib import Path
+
+    bench_table = pd.read_csv(TOP / 'data/pegasus_embedding.csv')       # the table from the cell above
+    _t = bench_table.sort_values('HW spins per problem spin', ascending=False, na_position='first')
+    _labels = [f'{p}  ({n} spins, {c:.0f}% coupled)' for p, n, c in zip(_t['problem'], _t['spins'], _t['% pairs coupled'])]
+    _ratio = _t['HW spins per problem spin']
+
+    _fig, _ax = plt.subplots(figsize=(9, 5))
+    _ax.barh(_labels, _ratio.fillna(0), color='tab:blue')
+    for _y, _r in enumerate(_ratio):                                     # write the number next to each bar
+        _ax.text(_r + 0.2 if pd.notna(_r) else 1.3, _y, f'{_r:.1f}' if pd.notna(_r) else "doesn't fit", va='center')
+    _ax.axvline(1, color='k', ls='--', label='crossbar: 1 per problem spin')
+    _ax.set_xlabel('Pegasus hardware spins per problem spin')
+    _ax.set_title("Real problems on Wu et al.'s Pegasus chips")
+    _ax.legend(loc='lower right')
+    _fig.tight_layout()
+    _fig
     return
 
 

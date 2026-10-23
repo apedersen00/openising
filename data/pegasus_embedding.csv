@@ -1,0 +1,10 @@
+problem,spins,couplings,% pairs coupled,"fully connected, 1 chip","fully connected, 4 chips",minorminer,minorminer on,HW spins per problem spin
+Max-Cut pm1s_100,100,495,10.0,982.0,982.0,564.0,1 chip,5.6
+Max-Cut g05_100,100,2475,50.0,982.0,982.0,1249.0,1 chip,9.8
+Max-Cut pm1d_100,100,4901,99.0,982.0,982.0,,skipped (dense),9.8
+Max-Cut G14,800,4694,1.5,,,,failed,
+QKP jeu_100_25_1 penalty,110,5992,99.9,1190.0,1190.0,,skipped (dense),10.8
+QKP jeu_100_25_1 objective,100,1280,25.9,982.0,982.0,1202.0,1 chip,9.8
+TSP burma14,196,5096,26.7,,3494.0,4691.0,4 chips,17.8
+MIMO 16 users 4-QAM,32,496,100.0,154.0,154.0,,skipped (dense),4.8
+MIMO 64 users 16-QAM,256,32384,99.2,,5844.0,,skipped (dense),22.8
