@@ -114,7 +114,45 @@ def place_cores(J, labels, near, seed=0, iters=20000):
 # ---------- Event solver with delays ----------
 
 @njit
-def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near, deg_far, max_events):
+def heap_push(ht, hk, hd, hc, size, t, k, d, c):
+    """
+    Add a message (arrival time t, spin k, change d, class c: 0 near, 1 far) to the binary heap; earliest on top.
+    """
+    i = size
+    ht[i] = t; hk[i] = k; hd[i] = d; hc[i] = c
+    while i > 0:                                                        # move up while earlier than the parent
+        p = (i - 1) // 2
+        if ht[p] <= ht[i]:
+            break
+        ht[p], ht[i] = ht[i], ht[p]; hk[p], hk[i] = hk[i], hk[p]; hd[p], hd[i] = hd[i], hd[p]; hc[p], hc[i] = hc[i], hc[p]
+        i = p
+    return size + 1
+
+
+@njit
+def heap_pop(ht, hk, hd, hc, size):
+    """
+    Remove and return the earliest message.
+    """
+    k, d, c = hk[0], hd[0], hc[0]
+    size -= 1
+    ht[0] = ht[size]; hk[0] = hk[size]; hd[0] = hd[size]; hc[0] = hc[size]
+    i = 0
+    while True:                                                         # move the last one down to its place
+        l, r, m = 2 * i + 1, 2 * i + 2, i
+        if l < size and ht[l] < ht[m]:
+            m = l
+        if r < size and ht[r] < ht[m]:
+            m = r
+        if m == i:
+            break
+        ht[m], ht[i] = ht[i], ht[m]; hk[m], hk[i] = hk[i], hk[m]; hd[m], hd[i] = hd[i], hd[m]; hc[m], hc[i] = hc[i], hc[m]
+        i = m
+    return k, d, c, size
+
+
+@njit
+def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near, deg_far, max_events, jitter, t_max):
     """
     Exact event-driven multiplicative solver where couplings between cores arrive late.
 
@@ -129,6 +167,8 @@ def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near,
         - tau_near, tau_far: delays
         - deg_near, deg_far: number of near / far partners of every spin (for the counters)
         - max_events: cap on flips + arrivals (also the queue length)
+        - jitter: every message waits tau * (1 + jitter * U(-1, 1)); breaks the lock-step that makes pairs oscillate
+        - t_max: readout time; the run stops there even if it has not settled (np.inf = no timeout)
 
     Returns the spins, the end time, whether the run settled, and the counters
     [flips, near messages, far messages, near cell updates, far accumulator adds].
@@ -140,10 +180,9 @@ def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near,
             s[i] = 1.0
     f = J_in @ s + J_near @ s + J_far @ s + h                           # every core knows the start state (shared kicks)
 
-    # one FIFO queue per delay class: (arrival time, spin, change). Fixed delay -> arrivals come in order.
-    qn_t = np.empty(max_events); qn_k = np.empty(max_events, np.int64); qn_d = np.empty(max_events)
-    qf_t = np.empty(max_events); qf_k = np.empty(max_events, np.int64); qf_d = np.empty(max_events)
-    hn = tn = hf = tf = 0                                               # head and tail of each queue
+    ht = np.empty(max_events); hk = np.empty(max_events, np.int64)      # messages in flight: arrival time, spin,
+    hd = np.empty(max_events); hc = np.empty(max_events, np.int64)      # change, class (0 near, 1 far)
+    size = 0
     counts = np.zeros(5)                                                # flips, near msgs, far msgs, near updates, far adds
 
     t = 0.0
@@ -156,34 +195,35 @@ def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near,
                 if t_i < dt_cross:
                     dt_cross = t_i
                     k = i
-        dt_near = qn_t[hn] - t if hn < tn else np.inf                   # time until the next message arrivals
-        dt_far = qf_t[hf] - t if hf < tf else np.inf
-
-        dt = min(dt_cross, dt_near, dt_far)
-        if dt == np.inf:                                                # nothing moves and nothing in flight: settled
+        dt_msg = ht[0] - t if size > 0 else np.inf                      # time until the next message arrives
+        if dt_cross == np.inf and dt_msg == np.inf:                     # nothing moves and nothing in flight: settled
             return s, t, True, counts
 
+        dt = min(dt_cross, dt_msg)
+        readout = t_max - t <= dt                                       # the readout comes first: stop there
+        if readout:
+            dt = t_max - t
         for i in range(n):                                              # move every voltage up to the next event
             reached = v[i] * f[i] < 0 and -v[i] / f[i] <= dt
             v[i] = min(1.0, max(-1.0, v[i] + dt * f[i]))
             if reached:
                 v[i] = 0.0
         t += dt
+        if readout:
+            return s, t, False, counts
 
-        if dt_near <= dt_far and dt_near <= dt:                         # a near message arrives (messages win ties)
-            kk, d = qn_k[hn], qn_d[hn]
-            hn += 1
-            for j in range(n):
-                f[j] += J_near[kk, j] * d
-            counts[1] += 1
-            counts[3] += deg_near[kk]
-        elif dt_far <= dt:                                              # a far message arrives: the accumulators add
-            kk, d = qf_k[hf], qf_d[hf]
-            hf += 1
-            for j in range(n):
-                f[j] += J_far[kk, j] * d
-            counts[2] += 1
-            counts[4] += deg_far[kk]
+        if dt_msg <= dt_cross:                                          # a message arrives (messages win ties)
+            kk, d, c, size = heap_pop(ht, hk, hd, hc, size)
+            if c == 0:                                                  # edge couplers see the new state
+                for j in range(n):
+                    f[j] += J_near[kk, j] * d
+                counts[1] += 1
+                counts[3] += deg_near[kk]
+            else:                                                       # the accumulators add
+                for j in range(n):
+                    f[j] += J_far[kk, j] * d
+                counts[2] += 1
+                counts[4] += deg_far[kk]
         else:                                                           # spin k flips
             d = np.sign(f[k]) - s[k]
             s[k] = np.sign(f[k])
@@ -197,8 +237,8 @@ def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near,
                     counts[1] += 1
                     counts[3] += deg_near[k]
                 else:
-                    qn_t[tn] = t + tau_near; qn_k[tn] = k; qn_d[tn] = d
-                    tn += 1
+                    delay = tau_near * (1 + jitter * (2 * np.random.random() - 1))
+                    size = heap_push(ht, hk, hd, hc, size, t + delay, k, d, 0)
             if deg_far[k] > 0:
                 if tau_far == 0.0:
                     for j in range(n):
@@ -206,18 +246,19 @@ def analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near,
                     counts[2] += 1
                     counts[4] += deg_far[k]
                 else:
-                    qf_t[tf] = t + tau_far; qf_k[tf] = k; qf_d[tf] = d
-                    tf += 1
+                    delay = tau_far * (1 + jitter * (2 * np.random.random() - 1))
+                    size = heap_push(ht, hk, hd, hc, size, t + delay, k, d, 1)
     return s, t, False, counts
 
 
 @njit
-def solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters, max_events):
+def solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters, max_events, jitter, t_max, seed):
     """
     Kicked restarts around analog_event_delayed: keep the best state, flip a cluster of it, run again.
 
     Returns the best state and energy, and per run: energy, best energy, end time, settled, and the 5 counters.
     """
+    np.random.seed(seed)                                                # numba's own generator, for the jitter
     n_iter = len(sizes)
     J = J_in + J_near + J_far
     deg_near = (J_near != 0).sum(axis=1).astype(np.float64)
@@ -227,7 +268,7 @@ def solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters
     best_E = np.inf
     for it in range(n_iter):
         s, T, settled, counts = analog_event_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, deg_near, deg_far,
-                                                   max_events)
+                                                   max_events, jitter, t_max)
         E = -0.5 * s @ J @ s - h @ s                                    # always the full problem
         if E < best_E:
             best_s, best_E = s.copy(), E
@@ -242,10 +283,13 @@ def solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters
     return best_s, best_E, history
 
 
-def multicore_delayed(J_in, J_near, J_far, h, tau_near, tau_far, n_iter, kick0, seed, max_events=None):
+def multicore_delayed(J_in, J_near, J_far, h, tau_near, tau_far, n_iter, kick0, seed, jitter=0.5, t_max=np.inf,
+                      max_events=None):
     """
     Args:
         - kick0: first kick as a fraction of the spins, shrinking linearly to 1 spin
+        - jitter: random spread of every message delay (0.5: between 0.5 tau and 1.5 tau)
+        - t_max: readout time per run (np.inf: wait until settled)
     """
     rng = np.random.default_rng(seed)
     n = len(h)
@@ -255,4 +299,5 @@ def multicore_delayed(J_in, J_near, J_far, h, tau_near, tau_far, n_iter, kick0, 
     clusters = np.zeros((n_iter, n), dtype=np.int64)
     for it in range(n_iter):
         clusters[it, :sizes[it]] = rng.choice(n, size=sizes[it], replace=False)
-    return solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters, max_events)
+    return solver_delayed(J_in, J_near, J_far, h, v, tau_near, tau_far, sizes, clusters, max_events, jitter, t_max,
+                          seed)
