@@ -220,30 +220,81 @@ def _(dnx):
 
 
 @app.cell
-def _(busclique, wu_chip, wu_four):
-    wu_chip_clique = busclique.busgraph_cache(wu_chip).largest_clique()
-    wu_four_clique = busclique.busgraph_cache(wu_four).largest_clique()
-    len(wu_chip_clique), len(wu_four_clique)
-    return
+def _(MaxcutParserStage, TOP, busclique, minorminer, nx, wu_chip, wu_four):
+    import sys
+    import pandas as pd
+    from ising.stages.tsp_parser_stage import TSPParserStage
+    from ising.stages.mimo_parser_stage import MIMOParserStage
+    from ising.generators.TSP import TSP
+    sys.path.insert(0, str(TOP / 'scripts'))
+    from qkp import load_qkp, knapsack_to_qubo
 
+    # ---------- the problems, each as its J matrix (only which entries are non-zero matters) ----------
+    def _maxcut(file):
+        return MaxcutParserStage.generate_maxcut(MaxcutParserStage.G_parser(file)[0]).J
 
-@app.cell
-def _(np):
-    from ising.stages import TOP                                   # path to the openising folder
-    from ising.stages.maxcut_parser_stage import MaxcutParserStage
+    def _mimo(file):
+        _H, _x, _M, _ant, _users = MIMOParserStage.parse_MIMO(TOP / 'ising/benchmarks/MIMO' / file)
+        return MIMOParserStage.MIMO_to_Ising(_H, _x[:, 0], 10, _users, _ant, _M, seed=1)[0].J   # first received signal
 
-    maxcut_file = TOP / 'ising/benchmarks/biqmac/rudy/g05_100.0'
-    maxcut_graph, _ = MaxcutParserStage.G_parser(maxcut_file)       # the problem graph: spins and coupled pairs
-    maxcut_model = MaxcutParserStage.generate_maxcut(maxcut_graph)   # the Ising model openising builds from it
-    maxcut_graph.number_of_nodes(), maxcut_graph.number_of_edges(), np.count_nonzero(maxcut_model.J)
-    return (maxcut_graph,)
+    _rudy = TOP / 'ising/benchmarks/biqmac/rudy'
+    _w, _P, _C = load_qkp('jeu_100_25_1')
+    _Q, _A, _b = knapsack_to_qubo(_w, _P, _C)
 
+    bench_J = {
+        'Max-Cut pm1s_100': _maxcut(_rudy / 'pm1s_100.0'),
+        'Max-Cut g05_100': _maxcut(_rudy / 'g05_100.0'),
+        'Max-Cut pm1d_100': _maxcut(_rudy / 'pm1d_100.0'),
+        'Max-Cut G14': _maxcut(TOP / 'ising/benchmarks/G/G14.txt'),
+        'QKP jeu_100_25_1 penalty': _Q + _A.T @ _A,         # constraint as squared penalty, slack bits included
+        'QKP jeu_100_25_1 objective': _Q[:100, :100],       # option B: constraint outside the grid, items only
+        'TSP burma14': TSP(TSPParserStage.TSP_parser(TOP / 'ising/benchmarks/TSP/burma14.tsp')[0]).J,
+        'MIMO 16 users 4-QAM': _mimo('user16_ant32_M4.txt'),
+        'MIMO 64 users 16-QAM': _mimo('user64_ant256_M16.txt'),
+    }
 
-@app.cell
-def _(maxcut_graph, minorminer, wu_chip):
-    maxcut_emb = minorminer.find_embedding(maxcut_graph.edges, wu_chip.edges, random_seed=1)
-    maxcut_hw = sum(len(chain) for chain in maxcut_emb.values())
-    maxcut_hw, maxcut_hw / maxcut_graph.number_of_nodes(), max(len(chain) for chain in maxcut_emb.values())
+    # ---------- embed every problem and count hardware spins ----------
+    def _count(emb):
+        return sum(len(chain) for chain in emb.values()) if emb else None    # None = doesn't fit
+
+    _cache_chip = busclique.busgraph_cache(wu_chip)       # loads from disk, built in the cell above
+    _cache_four = busclique.busgraph_cache(wu_four)
+
+    _rows = []
+    for _name, _J in bench_J.items():
+        _G = nx.from_numpy_array(_J != 0)                 # problem graph: which pairs have a non-zero J
+        _G.remove_edges_from(nx.selfloop_edges(_G))       # the diagonal holds biases, not couplings
+        _n, _e = _G.number_of_nodes(), _G.number_of_edges()
+        _density = _e / (_n * (_n - 1) / 2)
+
+        # worst case: treat the problem as fully connected (busclique, instant)
+        _fc_chip = _count(_cache_chip.find_clique_embedding(_n))
+        _fc_four = _count(_cache_four.find_clique_embedding(_n))
+
+        # problem-specific (minorminer, slow): try one chip, then four; skipped when (almost) fully connected
+        _mm, _mm_on = None, 'skipped (dense)'
+        if _density < 0.9:
+            for _hw_name, _hw in [('1 chip', wu_chip), ('4 chips', wu_four)]:
+                _mm = _count(minorminer.find_embedding(_G.edges, _hw.edges, random_seed=1, tries=3, timeout=300))
+                _mm_on = _hw_name if _mm else 'failed'
+                if _mm:
+                    break
+
+        _found = [_x for _x in (_fc_chip, _fc_four, _mm) if _x]
+        _rows.append({
+            'problem': _name,
+            'spins': _n,
+            'couplings': _e,
+            '% pairs coupled': round(100 * _density, 1),
+            'fully connected, 1 chip': _fc_chip,
+            'fully connected, 4 chips': _fc_four,
+            'minorminer': _mm,
+            'minorminer on': _mm_on,
+            'HW spins per problem spin': round(min(_found) / _n, 1) if _found else None,
+        })
+        print(f'done: {_name}')
+
+    pd.DataFrame(_rows)
     return
 
 
