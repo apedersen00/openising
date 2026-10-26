@@ -15,6 +15,14 @@ def _():
     return ANALOG, CONTROL, Clock, EDGE, Simulator, ps
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Timebase and Kernel
+    """)
+    return
+
+
 @app.cell
 def _(Clock, ps):
     core = Clock('core', 1e9)
@@ -56,6 +64,27 @@ def _(Simulator, core):
     sim2.schedule(0, tick)
     print(sim2.run(), list(ticks))
     print(sim2.run(until=5500), ticks)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Specs
+    """)
+    return
+
+
+@app.cell
+def _():
+    from dataclasses import replace
+    from hwmodel.spec import MachineSpec
+
+    spec = MachineSpec()
+    print(spec)
+
+    fast = replace(spec, clock=replace(spec.clock, f_core=3e9))     # one field changed, the rest kept
+    print(fast.derived())
     return
 
 
