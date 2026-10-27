@@ -78,14 +78,14 @@ def _(mo):
 @app.cell
 def _():
     from dataclasses import replace
-    from hwmodel.spec import MachineSpec
+    from hwmodel.spec import MachineSpec, NodeSpec
 
     spec = MachineSpec()
     print(spec)
 
     fast = replace(spec, clock=replace(spec.clock, f_core=3e9))     # one field changed, the rest kept
     print(fast.derived())
-    return
+    return (NodeSpec,)
 
 
 @app.cell
@@ -105,6 +105,40 @@ def _():
 
     # the nearst codes for 
     cell.code([-1.0, -0.3, 0.0, 0.3, 1.0, 2.0], lsb=1/7), cell.current(7)
+    return (np,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Node
+    """)
+    return
+
+
+@app.cell
+def _(NodeSpec, np):
+    from hwmodel.node import LinearNode
+    nspec = NodeSpec()
+    node = LinearNode(nspec, [nspec.V_high])
+    I = np.array([-700e-9])
+    dt, k = node.next_crossing(I)
+    dt, k, nspec.ramp_time(700e-9)
+    return I, dt, node
+
+
+@app.cell
+def _(I, dt, node):
+    node.advance(I, dt)
+    node.flip(0)
+    node.V, node.s
+    return
+
+
+@app.cell
+def _(I, node):
+    node.advance(I, 100_000)
+    node.V, node.next_crossing(I)
     return
 
 
