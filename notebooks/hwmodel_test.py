@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.1"
+__generated_with = "0.25.2"
 app = marimo.App()
 
 
@@ -85,6 +85,26 @@ def _():
 
     fast = replace(spec, clock=replace(spec.clock, f_core=3e9))     # one field changed, the rest kept
     print(fast.derived())
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Current DAC
+    """)
+    return
+
+
+@app.cell
+def _():
+    from hwmodel.dac import CurrentDAC
+    import numpy as np
+
+    cell = CurrentDAC(3, 100e-9)    # magnitude bits, unit current
+
+    # the nearst codes for 
+    cell.code([-1.0, -0.3, 0.0, 0.3, 1.0, 2.0], lsb=1/7), cell.current(7)
     return
 
 
