@@ -105,7 +105,7 @@ def _():
 
     # the nearst codes for 
     cell.code([-1.0, -0.3, 0.0, 0.3, 1.0, 2.0], lsb=1/7), cell.current(7)
-    return (np,)
+    return CurrentDAC, np
 
 
 @app.cell(hide_code=True)
@@ -124,7 +124,7 @@ def _(NodeSpec, np):
     I = np.array([-700e-9])
     dt, k = node.next_crossing(I)
     dt, k, nspec.ramp_time(700e-9)
-    return I, dt, node
+    return I, dt, node, nspec
 
 
 @app.cell
@@ -139,6 +139,45 @@ def _(I, dt, node):
 def _(I, node):
     node.advance(I, 100_000)
     node.V, node.next_crossing(I)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Crossbar
+    """)
+    return
+
+
+@app.cell
+def _(CurrentDAC, np, nspec):
+    from hwmodel.crossbar import Crossbar
+
+    rng = np.random.default_rng(0)
+
+    # Generate random quantized 4-bit J
+    Jt = rng.integers(-7, 8, (64, 64))
+    np.fill_diagonal(Jt, 0)
+
+    # Generate random qunatized 6-bit h
+    ht = rng.integers(-63, 64, 64)
+
+    # Define the crossbar
+    xb = Crossbar(Jt, ht, rng.choice([-1, 1], 64),
+                  CurrentDAC(3, nspec.I_unit), CurrentDAC(6, nspec.I_unit), CurrentDAC(3, nspec.I_unit))
+
+    # Flip 1000 random spins
+    for _k in rng.integers(0, 64, 1000):
+        xb.flip(_k)
+
+    # Get the current
+    I0 = xb.current()
+
+    xb.F[5] = -7
+
+    # Does the model current align with J @ x + h
+    np.allclose(I0, nspec.I_unit * (Jt @ xb.s + ht)), xb.current()[5] - I0[5]
     return
 
 
