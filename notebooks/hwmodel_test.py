@@ -124,7 +124,7 @@ def _(NodeSpec, np):
     I = np.array([-700e-9])
     dt, k = node.next_crossing(I)
     dt, k, nspec.ramp_time(700e-9)
-    return I, dt, node, nspec
+    return I, LinearNode, dt, node, nspec
 
 
 @app.cell
@@ -178,6 +178,43 @@ def _(CurrentDAC, np, nspec):
 
     # Does the model current align with J @ x + h
     np.allclose(I0, nspec.I_unit * (Jt @ xb.s + ht)), xb.current()[5] - I0[5]
+    return (Crossbar,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Core
+    """)
+    return
+
+
+@app.cell
+def _(Crossbar, CurrentDAC, LinearNode, Simulator, np, nspec):
+    from scripts.lagrange import analog_event
+    from hwmodel.core import AnalogCore
+
+    ## Compare hwmodel against known good event solver
+
+    # Generate random problem
+    _rng = np.random.default_rng(0)
+    _Jt = np.triu(_rng.integers(-7, 8, (64, 64)), 1)
+    _Jt = _Jt + _Jt.T
+    _ht = _rng.integers(-7, 8, 64)
+    v0 = _rng.uniform(-1, 1, 64)
+
+    # Run on good solver
+    s_ref, t_ref, n_ref = analog_event(_Jt.astype(float), _ht.astype(float), v0.copy(), 10_000)
+
+    # Set up hwmodel
+    _sim = Simulator()
+    _node = LinearNode(nspec, nspec.V_th + v0 * (nspec.V_high - nspec.V_th))
+    _xb = Crossbar(_Jt, _ht, _node.s, CurrentDAC(3, nspec.I_unit), CurrentDAC(6, nspec.I_unit), CurrentDAC(3, nspec.I_unit))
+    _core = AnalogCore(_sim, _node, _xb, nspec.t_cmp)
+    _sim.run()
+    unit = nspec.C * (nspec.V_high - nspec.V_th) / nspec.I_unit * 1e12     # ps per analog_event time unit
+
+    np.array_equal(_xb.s, s_ref), len(_core.flips), n_ref, _sim.now, round(t_ref * unit)
     return
 
 
