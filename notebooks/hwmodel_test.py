@@ -407,14 +407,14 @@ def _(Clock, CurrentDAC, Mapping, Simulator, np, replace, spec):
 
     # 20 spins in 5 groups of 4 (couplings 1 inside a group) -> 5 cores of 4. Mesh 4 x 4 tiles, chips of 2 x 2 tiles.
     _J = np.kron(np.eye(5), np.ones((4, 4))) - np.eye(20)
-    for _a, _b in [(0, 4), (0, 12), (0, 16), (1, 7), (2, 5), (3, 6)]:   # weak far couplings of core 0
+    for _a, _b in [(0, 4), (0, 12), (0, 16), (1, 7), (2, 5), (3, 6)]:   # weak far couplings
         _J[_a, _b] = _J[_b, _a] = 0.5
     _spec = replace(spec, core=replace(spec.core, c=4), net=replace(spec.net, chip=2))
     _m = Mapping(_J, np.zeros(20), _spec, CurrentDAC(3, 1), CurrentDAC(6, 1))
     print('spins per core:', [list(_s) for _s in _m.spins])
     print('tile (row, col) per core:', [divmod(int(_t), 4) for _t in _m.tile])
     print('from core 0: hops', _m.hops[0], 'chip edges', _m.chips[0])
-    print('fan-out of spins 0..3:', [list(_m.fanout[_k]) for _k in range(4)])
+    print('fan-out of spins 0, 1, 2, 3, 5, 12:', [list(_m.fanout[_k]) for _k in (0, 1, 2, 3, 5, 12)])
 
     class _Rx:
         """
@@ -431,16 +431,18 @@ def _(Clock, CurrentDAC, Mapping, Simulator, np, replace, spec):
     _log = []
     _mesh = Mesh(_sim, _clk, _spec.net, _m, np.random.default_rng(0))
     _mesh.far = [_Rx(_sim, _q, _log) for _q in range(_m.K)]
-    _port = SendPort(_sim, _clk, spec.clock.sync, _spec.net, _mesh, _m.spins[0])
+    _port0, _port1, _port3 = (SendPort(_sim, _clk, spec.clock.sync, _spec.net, _mesh, _m.spins[_p]) for _p in (0, 1, 3))
 
-    _sim.schedule(500, _port.flip, 0)          # spin 0 flips
-    _sim.schedule(2_500, _port.flip, 1)        # spin 1 flips ...
-    _sim.schedule(2_700, _port.flip, 1)        # ... and back in the same cycle: no packet
-    _sim.schedule(3_100, _port.flip, 2)        # spins 2 and 3 in the same cycle: they share the link
-    _sim.schedule(3_200, _port.flip, 3)
+    _sim.schedule(500, _port0.flip, 0)          # spin 0 flips
+    _sim.schedule(2_500, _port0.flip, 1)        # spin 1 flips ...
+    _sim.schedule(2_700, _port0.flip, 1)        # ... and back in the same cycle: no packet
+    _sim.schedule(3_100, _port0.flip, 2)        # spins 2 and 3 in the same cycle: they share the link
+    _sim.schedule(3_200, _port0.flip, 3)
+    _sim.schedule(20_500, _port3.flip, 0)       # spin 12 (local 0 of core 3, 2 hops from core 0) ...
+    _sim.schedule(22_500, _port1.flip, 1)       # ... and spin 5 (local 1 of core 1, 1 hop) both reach core 0 at 28 ns
     _sim.run()
     print(_log)
-    print(_port.stats)
+    print(_port0.stats)
     print(_mesh.stats)
     return
 

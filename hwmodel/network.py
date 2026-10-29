@@ -16,11 +16,13 @@ class Mesh:
         self.fanout = mapping.fanout
         self.delay = clock.cycles(spec.t_inj + spec.t_hop * mapping.hops + spec.t_chip * mapping.chips)
         self.dither = spec.dither
+        self.t_rx = clock.cycles(spec.t_rx)
+        self.rx_free = [0] * mapping.K                                  # time each far unit takes the next packet
         self.period = clock.period
         self.rng = rng
         self.far = None
         self.in_flight = 0
-        self.stats = dict(packets=0, deliveries=0)
+        self.stats = dict(packets=0, deliveries=0, rx_waits=0)
 
     def send(self, k):
         """
@@ -28,12 +30,19 @@ class Mesh:
         """
         p = self.core[k]
         self.stats['packets'] += 1
+        d = int(self.rng.integers(0, self.dither + 1)) * self.period if self.dither else 0
         for q in self.fanout[k]:
-            d = int(self.delay[p, q])
-            if self.dither:
-                d += int(self.rng.integers(0, self.dither + 1)) * self.period
             self.in_flight += 1
-            self.sim.after(d, self.deliver, q, k)
+            self.sim.after(int(self.delay[p, q]) + d, self.arrive, q, k)
+
+    def arrive(self, q, k):
+        """
+        Packet reaches the router of core q. It waits for the router's port to the far unit.
+        """
+        t = max(self.sim.now, self.rx_free[q])
+        self.stats['rx_waits'] += t > self.sim.now
+        self.rx_free[q] = t + self.t_rx
+        self.sim.schedule(t, self.deliver, q, k)
 
     def deliver(self, q, k):
         """

@@ -74,13 +74,11 @@ class NetSpec(Spec):
     """
     mesh        : int  = p(4, 'tiles', 'the mesh is mesh x mesh tiles')
     chip        : int  = p(4, 'tiles', 'the chip is chip x chip tiles (mesh must be a multiple)')
-    ports       : str  = p('per_core', '', "'per_core': one port per core, 'shared': one bus for all")
-    multicast   : bool = p(True, '', 'send only to cores that hold a row for the spin')
-    send_merge  : bool = p(True, '', 'send queue merges waiting flips of the same spin')
     t_inj       : int  = p(2, 'cycles', 'core -> router')
     t_hop       : int  = p(2, 'cycles', 'per router jump')
     t_chip      : int  = p(10, 'cycles', 'per chip edge crossed')
     t_link      : int  = p(1, 'cycles', 'per packet on a port')
+    t_rx        : int  = p(1, 'cycles', 'per packet from the router into the far unit')
     dither      : int  = p(0, 'cycles', 'random extra delay per packet (for stopping oscillation)')
 
 
@@ -90,8 +88,6 @@ class FarSpec(Spec):
     Digital unit that receives spin flip events and reprograms the corresponding bias.
     """
     dac_bits    : int | None = p(None, 'bits', 'magnitude bits of an F_row DAC. None = exact')
-    sram_format : str  = p('dense', '', "'dense': c codes per row, 'packed': (column, code) per nonzero")
-    merge       : bool = p(True, '', 'dirty bit per row: waiting events of the same spin merge')
     lanes       : int  = p(1, 'rows/cyc', 'rows the far unit takes per cycle')
     t_pipe      : int  = p(4, 'cycles', 'row read -> adds -> DAC code')
 
