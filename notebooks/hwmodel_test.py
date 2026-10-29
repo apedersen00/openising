@@ -392,6 +392,59 @@ def _(Clock, CurrentDAC, Simulator, np, spec):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Mesh
+    """)
+    return
+
+
+@app.cell
+def _(Clock, CurrentDAC, Mapping, Simulator, np, replace, spec):
+    from hwmodel.flipenc import SendPort
+    from hwmodel.network import Mesh
+
+    # 20 spins in 5 groups of 4 (couplings 1 inside a group) -> 5 cores of 4. Mesh 4 x 4 tiles, chips of 2 x 2 tiles.
+    _J = np.kron(np.eye(5), np.ones((4, 4))) - np.eye(20)
+    for _a, _b in [(0, 4), (0, 12), (0, 16), (1, 7), (2, 5), (3, 6)]:   # weak far couplings of core 0
+        _J[_a, _b] = _J[_b, _a] = 0.5
+    _spec = replace(spec, core=replace(spec.core, c=4), net=replace(spec.net, chip=2))
+    _m = Mapping(_J, np.zeros(20), _spec, CurrentDAC(3, 1), CurrentDAC(6, 1))
+    print('spins per core:', [list(_s) for _s in _m.spins])
+    print('tile (row, col) per core:', [divmod(int(_t), 4) for _t in _m.tile])
+    print('from core 0: hops', _m.hops[0], 'chip edges', _m.chips[0])
+    print('fan-out of spins 0..3:', [list(_m.fanout[_k]) for _k in range(4)])
+
+    class _Rx:
+        """
+        Stands in for a far unit: logs (ns, core, spin) of every packet it receives.
+        """
+        def __init__(self, sim, q, log):
+            self.sim, self.q, self.log = sim, q, log
+
+        def receive(self, k):
+            self.log.append((self.sim.now / 1000, self.q, int(k)))
+
+    _sim = Simulator()
+    _clk = Clock('core', spec.clock.f_core)
+    _log = []
+    _mesh = Mesh(_sim, _clk, _spec.net, _m, np.random.default_rng(0))
+    _mesh.far = [_Rx(_sim, _q, _log) for _q in range(_m.K)]
+    _port = SendPort(_sim, _clk, spec.clock.sync, _spec.net, _mesh, _m.spins[0])
+
+    _sim.schedule(500, _port.flip, 0)          # spin 0 flips
+    _sim.schedule(2_500, _port.flip, 1)        # spin 1 flips ...
+    _sim.schedule(2_700, _port.flip, 1)        # ... and back in the same cycle: no packet
+    _sim.schedule(3_100, _port.flip, 2)        # spins 2 and 3 in the same cycle: they share the link
+    _sim.schedule(3_200, _port.flip, 3)
+    _sim.run()
+    print(_log)
+    print(_port.stats)
+    print(_mesh.stats)
+    return
+
+
 @app.cell
 def _():
     return
