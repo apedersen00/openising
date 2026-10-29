@@ -215,7 +215,7 @@ def _(Crossbar, CurrentDAC, LinearNode, Simulator, np, nspec):
     unit = nspec.C * (nspec.V_high - nspec.V_th) / nspec.I_unit * 1e12     # ps per analog_event time unit
 
     np.array_equal(_xb.s, s_ref), len(_core.flips), n_ref, _sim.now, round(t_ref * unit)
-    return
+    return (analog_event,)
 
 
 @app.cell
@@ -444,6 +444,37 @@ def _(Clock, CurrentDAC, Mapping, Simulator, np, replace, spec):
     print(_log)
     print(_port0.stats)
     print(_mesh.stats)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Machine
+    """)
+    return
+
+
+@app.cell
+def _(analog_event, np, replace, spec):
+    from hwmodel.machine import Machine
+
+    # Test A: with every delay 0 the machine must do what analog_event does. 160 random spins -> 10 cores of 16.
+    _zero = replace(spec, core=replace(spec.core, c=16), clock=replace(spec.clock, sync=0),
+                    net=replace(spec.net, t_inj=0, t_hop=0, t_chip=0, t_link=0, t_rx=0), far=replace(spec.far, t_pipe=0))
+    _rng = np.random.default_rng(42)
+    _n = 160
+    _J = np.triu(_rng.integers(-7, 8, (_n, _n)) * (_rng.random((_n, _n)) < 0.05), 1)
+    _J = _J + _J.T
+    _same, _flips, _ended = 0, 0, 0
+    for _seed in range(40):
+        _v0 = np.random.default_rng(_seed).uniform(-1, 1, _n)
+        _mach = Machine(_J, np.zeros(_n), _zero, _v0, np.random.default_rng(_seed))
+        _ended += _mach.sim.run(max_events=1_000_000) == 'empty'                 # 'max_events' = stuck at one ps
+        _s_ref, _, _n_ref = analog_event(_mach.map.J.astype(float), _mach.map.h.astype(float), _v0.copy(), 1_000_000)
+        _same += np.array_equal(_mach.s, _s_ref)
+        _flips += sum(len(_c.flips) for _c in _mach.cores) == _n_ref
+    _mach.map.K, _ended, _same, _flips
     return
 
 
