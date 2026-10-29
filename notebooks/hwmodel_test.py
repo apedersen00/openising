@@ -85,7 +85,7 @@ def _():
 
     fast = replace(spec, clock=replace(spec.clock, f_core=3e9))     # one field changed, the rest kept
     print(fast.derived())
-    return (NodeSpec,)
+    return NodeSpec, replace, spec
 
 
 @app.cell
@@ -215,6 +215,139 @@ def _(Crossbar, CurrentDAC, LinearNode, Simulator, np, nspec):
     unit = nspec.C * (nspec.V_high - nspec.V_th) / nspec.I_unit * 1e12     # ps per analog_event time unit
 
     np.array_equal(_xb.s, s_ref), len(_core.flips), n_ref, _sim.now, round(t_ref * unit)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Mapping
+    """)
+    return
+
+
+@app.cell
+def _(CurrentDAC, np, replace, spec):
+    from hwmodel.mapping import Mapping
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgb
+
+    # 8x8 lattice with open edges and random +-1 couplings -> 4 cores of 16 spins
+    _L = 8
+    _rng = np.random.default_rng(0)
+    Jl = np.zeros((_L * _L, _L * _L))
+    for _r in range(_L):
+        for _q in range(_L):
+            for _r2, _q2 in ((_r, _q + 1), (_r + 1, _q)):          # right and down neighbour
+                if _r2 < _L and _q2 < _L:
+                    Jl[_r * _L + _q, _r2 * _L + _q2] = Jl[_r2 * _L + _q2, _r * _L + _q] = _rng.choice([-1, 1])
+
+    ml = Mapping(Jl, np.zeros(_L * _L), replace(spec, core=replace(spec.core, c=16)),
+                    CurrentDAC(3, spec.node.I_unit), CurrentDAC(6, spec.node.I_unit))
+
+    _colors = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100']      # one colour per core
+    _far, _grid, _bg = '#0b0b0b', '#c3c2b7', '#fcfcfb'
+    fig_map, (_a, _o, _b) = plt.subplots(1, 3, figsize=(16, 5.2), facecolor=_bg)
+
+    def _pixels(order):
+        """
+        J as an RGB picture with the spins in this order: core colour inside a core, black between cores.
+        """
+        _img = np.ones((len(order), len(order), 3)) * to_rgb(_bg)
+        _c = ml.core[order]
+        for _i, _j in zip(*np.nonzero(ml.J[np.ix_(order, order)])):
+            _img[_i, _j] = to_rgb(_colors[_c[_i]]) if _c[_i] == _c[_j] else to_rgb(_far)
+        return _img
+
+    # left: the lattice. Spins coloured by core, far couplings dashed black
+    _y, _x = np.divmod(np.arange(_L * _L), _L)                     # position of spin i on the lattice
+    for _i, _j in zip(*np.nonzero(np.triu(Jl))):                   # every coupling once
+        _same = ml.core[_i] == ml.core[_j]
+        _a.plot([_x[_i], _x[_j]], [_y[_i], _y[_j]], color=_colors[ml.core[_i]] if _same else _far,
+                lw=1.5 if _same else 2, ls='-' if _same else '--', zorder=1)
+    _a.scatter(_x, _y, s=260, c=[_colors[_p] for _p in ml.core], edgecolors=_bg, linewidths=2, zorder=2)
+    for _i in range(_L * _L):
+        _a.text(_x[_i], _y[_i], ml.core[_i], ha='center', va='center', fontsize=8, color=_far, zorder=3)
+    _a.set_title('8x8 lattice: spins coloured by core\ndashed = far coupling (goes through the network)', fontsize=10)
+    _a.invert_yaxis()
+    _a.set_aspect('equal')
+    _a.axis('off')
+
+    # middle: J in the original spin order
+    _o.imshow(_pixels(np.arange(_L * _L)), interpolation='nearest')
+    _o.set_xticks(np.arange(0, _L * _L, _L))                         # a tick at the start of every lattice row
+    _o.set_yticks(np.arange(0, _L * _L, _L))
+    _o.set_title('J in the original spin order\nsame entries, the cores are interleaved', fontsize=10)
+
+    # right: J with the spins reordered core by core
+    _b.imshow(_pixels(np.concatenate(ml.spins)), interpolation='nearest')    # core 0's spins, then core 1's,
+    _n = np.array([len(_s) for _s in ml.spins])
+    for _e in np.cumsum(_n)[:-1] - 0.5:                            # lines between the cores
+        _b.axhline(_e, color=_grid, lw=0.8)
+        _b.axvline(_e, color=_grid, lw=0.8)
+    _mid = np.cumsum(_n) - _n / 2 - 0.5
+    _b.set_xticks(_mid, [f'core {_p}' for _p in range(ml.K)])
+    _b.set_yticks(_mid, [f'core {_p}' for _p in range(ml.K)])
+    _b.set_title('J reordered core by core\ncoloured blocks = crossbar cells, black = far SRAM rows', fontsize=10)
+
+    for _ax in (_o, _b):
+        _ax.tick_params(length=0)
+        for _s in _ax.spines.values():
+            _s.set_visible(False)
+    fig_map.tight_layout()
+
+    for _p in range(ml.K):
+        print(f'core {_p}: spins {ml.spins[_p]}, local couplings {np.count_nonzero(np.triu(ml.local[_p]))}, '
+                f'SRAM rows {len(ml.rows[_p])}: {ml.rows[_p]}')
+    print('spins whose flips leave their core:', sum(len(_f) > 0 for _f in ml.fanout), 'of', _L * _L)
+    fig_map
+    return Mapping, plt
+
+
+@app.cell
+def _(CurrentDAC, Mapping, np, plt, replace, spec):
+    from matplotlib.colors import ListedColormap
+
+    # 64 spins in 4 hidden groups of 16. Strong couplings (3..7) inside a group, weak ones (1..4) between groups.
+    # The spin numbers are shuffled, so the groups can't be seen in the original order.
+    _n = 64
+    _rng = np.random.default_rng(0)
+    _group = _rng.permutation(np.repeat(np.arange(4), 16))         # hidden group of every spin
+    _same = _group[:, None] == _group
+    _w = np.where(_same, _rng.integers(3, 8, (_n, _n)), _rng.integers(1, 5, (_n, _n)))
+    _on = _rng.random((_n, _n)) < np.where(_same, 0.4, 0.15)        # dense inside a group, sparse between
+    Jc = np.triu(_w * _on * _rng.choice([-1, 1], (_n, _n)), 1)
+    Jc = Jc + Jc.T
+
+    mc = Mapping(Jc, np.zeros(_n), replace(spec, core=replace(spec.core, c=16)),
+                    CurrentDAC(3, spec.node.I_unit), CurrentDAC(6, spec.node.I_unit))
+
+    # |J| code 0..7 -> background + one blue shade per code (light = weak, dark = strong)
+    _bg = '#fcfcfb'
+    _cmap = ListedColormap([_bg, '#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#256abf', '#184f95', '#0d366b'])
+    fig_strong, (_a, _b) = plt.subplots(1, 2, figsize=(10, 5), facecolor=_bg)
+
+    # left: |J| in the original spin order
+    _a.imshow(np.abs(mc.J), cmap=_cmap, vmin=-0.5, vmax=7.5, interpolation='nearest')
+    _a.set_title('|J| in the original spin order', fontsize=10)
+
+    # middle: |J| reordered core by core
+    _order = np.concatenate(mc.spins)
+    _im = _b.imshow(np.abs(mc.J[np.ix_(_order, _order)]), cmap=_cmap, vmin=-0.5, vmax=7.5, interpolation='nearest')
+    for _e in np.arange(16, _n, 16) - 0.5:
+        _b.axhline(_e, color='#52514e', lw=0.8)
+        _b.axvline(_e, color='#52514e', lw=0.8)
+    _b.set_xticks(np.arange(8, _n, 16) - 0.5, [f'core {_p}' for _p in range(mc.K)])
+    _b.set_yticks(np.arange(8, _n, 16) - 0.5, [f'core {_p}' for _p in range(mc.K)])
+    _b.set_title('|J| reordered core by core', fontsize=10)
+    fig_strong.colorbar(_im, ax=_b, ticks=range(8), fraction=0.046, label='|J| code')
+    for _ax in (_a, _b):
+        _ax.tick_params(length=0)
+        for _s in _ax.spines.values():
+            _s.set_visible(False)
+
+    fig_strong.tight_layout()
+    fig_strong
     return
 
 
