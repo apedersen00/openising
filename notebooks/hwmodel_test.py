@@ -215,7 +215,7 @@ def _(Crossbar, CurrentDAC, LinearNode, Simulator, np, nspec):
     unit = nspec.C * (nspec.V_high - nspec.V_th) / nspec.I_unit * 1e12     # ps per analog_event time unit
 
     np.array_equal(_xb.s, s_ref), len(_core.flips), n_ref, _sim.now, round(t_ref * unit)
-    return AnalogCore, analog_event
+    return
 
 
 @app.cell
@@ -354,53 +354,41 @@ def _(CurrentDAC, Mapping, np, plt, replace, spec):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## New core
+    ## Far unit
     """)
     return
 
 
 @app.cell
-def _(
-    AnalogCore,
-    Crossbar,
-    CurrentDAC,
-    LinearNode,
-    Simulator,
-    analog_event,
-    np,
-    nspec,
-):
-    # One core, 200 random problems: run from random voltages, then hold, preset a kicked state,
-    # write far codes F, release and run again. Reference: analog_event from the kicked state with bias h + F.
-    _same, _sent = 0, 0
-    for _seed in range(200):
-        _rng = np.random.default_rng(_seed)
-        _J = np.triu(_rng.integers(-7, 8, (64, 64)), 1)
-        _J = _J + _J.T
-        _h, _F = _rng.integers(-7, 8, 64), _rng.integers(-7, 8, 64)
-        _v0 = _rng.uniform(-1, 1, 64)
+def _(Clock, CurrentDAC, Simulator, np, spec):
+    from hwmodel.farunit import FarUnit
 
-        _sim = Simulator()
-        _node = LinearNode(nspec, nspec.V_th + _v0 * (nspec.V_high - nspec.V_th))
-        _xb = Crossbar(_J, _h, _node.s, CurrentDAC(3, nspec.I_unit), CurrentDAC(6, nspec.I_unit), CurrentDAC(None, nspec.I_unit))
-        _seen = []                                                  # what the send port would see
-        _core = AnalogCore(_sim, _node, _xb, nspec.t_cmp, on_flip=_seen.append)
-        _sim.run()
+    class _Probe:
+        """
+        Stands in for the core: records every F write (time in ns, codes).
+        """
+        def __init__(self, sim):
+            self.sim, self.log = sim, []
 
-        _kick = _xb.s.copy()
-        _kick[_rng.choice(64, 3, replace=False)] *= -1              # kick 3 random spins
-        _n_seen, _n_flips = len(_seen), len(_core.flips)
-        _core.hold()
-        _core.preset(_kick)
-        _core.set_far(_F)
-        _core.release()
-        _sim.run()
+        def set_far(self, F):
+            self.log.append((self.sim.now // 1000, F.tolist()))
 
-        _s_ref, _, _ = analog_event(_J.astype(float), (_h + _F).astype(float), _kick.astype(float), 10_000)
-        _same += np.array_equal(_xb.s, _s_ref)
-        _sent += len(_seen) - _n_seen == 3 + len(_core.flips) - _n_flips     # every change seen exactly once
+    # A core with 4 lines and 3 far spins (IDs 10, 11, 12). SRAM row = a far spin's couplings to the 4 lines.
+    _sram = np.array([[1,  0, 2, 0],      # spin 10
+                      [0, -1, 0, 0],      # spin 11
+                      [0,  0, 0, 3]])     # spin 12
+    _sim = Simulator()
+    _probe = _Probe(_sim)
+    _far = FarUnit(_sim, _probe, [10, 11, 12], _sram, [1, 1, 1], CurrentDAC(None, spec.node.I_unit),
+                   spec.far, Clock('core', spec.clock.f_core), lambda: None)
 
-    _same, _sent
+    _sim.schedule(0, _far.receive, 10)          # spin 10 flips to -1
+    _sim.schedule(0, _far.receive, 11)          # spin 11 flips to -1 in the same cycle: waits one cycle (1 lane)
+    _sim.schedule(10_000, _far.receive, 12)     # spin 12 flips ...
+    _sim.schedule(10_000, _far.receive, 12)     # ... and back before its row is read: they cancel
+    _sim.run()
+    print(_probe.log)
+    print(_far.stats)
     return
 
 
