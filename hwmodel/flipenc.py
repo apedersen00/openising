@@ -14,7 +14,7 @@ class SendPort:
     Each spin has a pending bit. A flip and a flip back before the
     packet leaves cancels it. One packet leaves every t_link cycles.
     """
-    def __init__(self, sim, clock, sync, spec, mesh, ids):
+    def __init__(self, sim, clock, sync, spec, mesh, ids, touch=lambda: None):
         self.sim = sim
         self.clock = clock
         self.sync = sync
@@ -27,6 +27,7 @@ class SendPort:
         self.free = 0
         self.syncing = 0
         self.sending = False
+        self.touch = touch
         self.stats = dict(flips=0, sent=0, pending_max=0)
 
     @property
@@ -37,6 +38,7 @@ class SendPort:
         """
         A comparator of skin k has flipped.
         """
+        self.touch()
         if not self.out[k]:
             return
         self.syncing += 1

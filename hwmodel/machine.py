@@ -35,7 +35,7 @@ class Machine:
         self.cores, self.ports, self.fars = [], [], []
         for p in range(m.K):
             ids = m.spins[p]
-            port = SendPort(self.sim, self.clock, spec.clock.sync, spec.net, self.mesh, ids)
+            port = SendPort(self.sim, self.clock, spec.clock.sync, spec.net, self.mesh, ids, touch)
             node = LinearNode(ns, ns.V_th + v0[ids] * (ns.V_high - ns.V_th))
             xb = Crossbar(m.local[p], m.h[ids], node.s, cell, hdac, fdac)
             core = AnalogCore(self.sim, node, xb, ns.t_cmp, on_flip=port.flip)
@@ -44,6 +44,13 @@ class Machine:
             self.ports.append(port)
             self.fars.append(far)
         self.mesh.far = self.fars
+
+    @property
+    def busy(self):
+        """
+        A flip is still on its way.
+        """
+        return self.mesh.in_flight > 0 or any(p.busy for p in self.ports) or any(f.busy for f in self.fars)
 
     @property
     def s(self):

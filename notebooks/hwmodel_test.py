@@ -478,6 +478,41 @@ def _(analog_event, np, replace, spec):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Controller
+    """)
+    return
+
+
+@app.cell
+def _(np, replace, spec):
+    from hwmodel.controller import Controller
+    from collections import Counter
+
+    # Test B: 160 random spins -> 10 cores of 16, default delays, 30 runs. t_quiet = 200 ns: no node can still be on its way.
+    _n = 160
+    _rng = np.random.default_rng(42)
+    _J = np.triu(_rng.integers(-7, 8, (_n, _n)) * (_rng.random((_n, _n)) < 0.05), 1)
+    _J = _J + _J.T
+    _spec = replace(spec, core=replace(spec.core, c=16), control=replace(spec.control, n_runs=30, t_quiet=200_000))
+    _ctl = Controller(_J, np.zeros(_n), _spec)
+    _ctl.solve()
+    _m, _mach = _ctl.machine.map, _ctl.machine
+
+    _stable = all(np.all(_s * (_m.J @ _s + _m.h) >= 0) for _s in _ctl.end)               # no spin wants to flip
+    _E_ok = all(_E == -0.5 * _s @ _m.J @ _s - _m.h @ _s for _E, _s in zip(_ctl.E, _ctl.end))
+    _win = [int(np.argmin(_ctl.E[:_i + 1])) for _i in range(_ctl.n_runs)]                 # winner after each run
+    _kick_ok = all(np.sum(_ctl.start[_i + 1] != _ctl.end[_win[_i]]) == _ctl.sizes[_i] for _i in range(_ctl.n_runs - 1))
+    _s = _mach.s
+    _far_ok = all(np.array_equal(_f.acc, _m.J[np.ix_(_m.spins[_p], _m.rows[_p])] @ _s[_m.rows[_p]])
+                  and np.array_equal(_c.xb.F, _f.acc) for _p, (_f, _c) in enumerate(zip(_mach.fars, _mach.cores)))
+    print(Counter(_ctl.why), '| stable', _stable, '| energies', _E_ok, '| kicks', _kick_ok, '| far fields', _far_ok,
+          '| best E', _ctl.best_E, '| sizes', _ctl.sizes[[0, 1, -1]], f'| mean run {np.mean(_ctl.t_run) / 1000:.0f} ns, total {_ctl.sim.now / 1e6:.2f} us')
+    return
+
+
 @app.cell
 def _():
     return
