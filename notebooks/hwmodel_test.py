@@ -215,7 +215,7 @@ def _(Crossbar, CurrentDAC, LinearNode, Simulator, np, nspec):
     unit = nspec.C * (nspec.V_high - nspec.V_th) / nspec.I_unit * 1e12     # ps per analog_event time unit
 
     np.array_equal(_xb.s, s_ref), len(_core.flips), n_ref, _sim.now, round(t_ref * unit)
-    return
+    return AnalogCore, analog_event
 
 
 @app.cell
@@ -348,6 +348,59 @@ def _(CurrentDAC, Mapping, np, plt, replace, spec):
 
     fig_strong.tight_layout()
     fig_strong
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## New core
+    """)
+    return
+
+
+@app.cell
+def _(
+    AnalogCore,
+    Crossbar,
+    CurrentDAC,
+    LinearNode,
+    Simulator,
+    analog_event,
+    np,
+    nspec,
+):
+    # One core, 200 random problems: run from random voltages, then hold, preset a kicked state,
+    # write far codes F, release and run again. Reference: analog_event from the kicked state with bias h + F.
+    _same, _sent = 0, 0
+    for _seed in range(200):
+        _rng = np.random.default_rng(_seed)
+        _J = np.triu(_rng.integers(-7, 8, (64, 64)), 1)
+        _J = _J + _J.T
+        _h, _F = _rng.integers(-7, 8, 64), _rng.integers(-7, 8, 64)
+        _v0 = _rng.uniform(-1, 1, 64)
+
+        _sim = Simulator()
+        _node = LinearNode(nspec, nspec.V_th + _v0 * (nspec.V_high - nspec.V_th))
+        _xb = Crossbar(_J, _h, _node.s, CurrentDAC(3, nspec.I_unit), CurrentDAC(6, nspec.I_unit), CurrentDAC(None, nspec.I_unit))
+        _seen = []                                                  # what the send port would see
+        _core = AnalogCore(_sim, _node, _xb, nspec.t_cmp, on_flip=_seen.append)
+        _sim.run()
+
+        _kick = _xb.s.copy()
+        _kick[_rng.choice(64, 3, replace=False)] *= -1              # kick 3 random spins
+        _n_seen, _n_flips = len(_seen), len(_core.flips)
+        _core.hold()
+        _core.preset(_kick)
+        _core.set_far(_F)
+        _core.release()
+        _sim.run()
+
+        _s_ref, _, _ = analog_event(_J.astype(float), (_h + _F).astype(float), _kick.astype(float), 10_000)
+        _same += np.array_equal(_xb.s, _s_ref)
+        _sent += len(_seen) - _n_seen == 3 + len(_core.flips) - _n_flips     # every change seen exactly once
+
+    _same, _sent
     return
 
 
