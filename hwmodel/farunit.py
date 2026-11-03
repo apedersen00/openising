@@ -29,6 +29,7 @@ class FarUnit:
         self.period = clock.period
         self.touch = touch                                      # function in the controller
         self.running = False                                    # a step is already being performed (forces it to be sequential)
+        self.free = 0
         self.writes = 0                                         # count far spin bias writess
         self.stats = dict(packets=0, cancelled=0, applied=0, pending_max=0)
         core.set_far(self.code())
@@ -55,12 +56,13 @@ class FarUnit:
         self.stats['pending_max'] = max(self.stats['pending_max'], self.n_pending)
         if self.pending[r] and not self.running:
             self.running = True
-            self.sim.after(0, self.step)
+            self.sim.schedule(max(self.sim.now, self.free), self.step)
 
     def step(self):
         """
         One cycle.
         """
+        self.free = self.sim.now + self.period
         # round robin style processing of pending spins
         idx = np.flatnonzero(self.pending)
         first = np.searchsorted(idx, self.last + 1)
