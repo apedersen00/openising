@@ -12,7 +12,7 @@ class SendPort:
     """
     A flip is seen on the n'th sync clock edge after it happens.
     Each spin has a pending bit. A flip and a flip back before the
-    packet leaves cancels it. One packet leaves every t_link cycles.
+    packet leaves cancels it. The port has width lanes, each sends one packet every t_link cycles.
     """
     def __init__(self, sim, clock, sync, spec, mesh, ids, touch=lambda: None):
         self.sim = sim
@@ -24,7 +24,7 @@ class SendPort:
         self.pending = np.zeros(len(ids), dtype=bool)
         self.last = -1
         self.t_link = clock.cycles(spec.t_link)
-        self.free = 0
+        self.free = [0] * spec.width                            # when each lane is free
         self.syncing = 0
         self.sending = False
         self.touch = touch
@@ -55,7 +55,7 @@ class SendPort:
         self.stats['pending_max'] = max(self.stats['pending_max'], int(self.pending.sum()))
         if self.pending[k] and not self.sending:
             self.sending = True
-            self.sim.schedule(max(self.sim.now, self.free), self.send)
+            self.sim.schedule(max(self.sim.now, min(self.free)), self.send)
 
     def send(self):
         """
@@ -70,8 +70,9 @@ class SendPort:
         self.last = k
         self.mesh.send(self.ids[k])
         self.stats['sent'] += 1
-        self.free = self.sim.now + self.t_link
+        lane = int(np.argmin(self.free))                        # the first free lane
+        self.free[lane] = self.sim.now + self.t_link
         if self.pending.any():
-            self.sim.schedule(self.free, self.send)
+            self.sim.schedule(max(self.sim.now, min(self.free)), self.send)
         else:
             self.sending = False

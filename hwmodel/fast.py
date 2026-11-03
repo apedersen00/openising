@@ -72,12 +72,12 @@ spec = [
     ('flips_t', int64[:]), ('flips_p', int64[:]), ('flips_k', int64[:]), ('n_flips', int64),
     # flipenc.py: SendPort
     ('sync', int64), ('t_link', int64), ('port_out', boolean[:, :]), ('port_pending', boolean[:, :]),
-    ('port_n_pending', int64[:]), ('port_last', int64[:]), ('port_free', int64[:]), ('port_syncing', int64[:]),
+    ('port_n_pending', int64[:]), ('port_last', int64[:]), ('port_free', int64[:, :]), ('port_syncing', int64[:]),
     ('port_sending', boolean[:]), ('port_flips', int64[:]), ('port_sent', int64[:]), ('port_pending_max', int64[:]),
     # network.py: Mesh
     ('mesh', int64), ('chip', int64), ('mesh_core', int64[:]), ('fanout_ptr', int64[:]), ('fanout', int64[:]),
     ('mesh_R', int64[:]), ('mesh_Q', int64[:]), ('t_inj', int64), ('t_hop', int64), ('t_chip', int64),
-    ('link_free', int64[:, :, :]), ('load', int64[:, :, :]), ('dither', int64), ('t_rx', int64),
+    ('link_free', int64[:, :, :, :]), ('load', int64[:, :, :]), ('dither', int64), ('t_rx', int64),
     ('rx_free', int64[:]), ('rng', numba.typeof(np.random.default_rng(0))), ('in_flight', int64),
     ('mesh_packets', int64), ('deliveries', int64), ('rx_waits', int64), ('link_waits', int64), ('link_wait_max', int64),
     # farunit.py: FarUnit (rows of all far units in one array, far unit q has rows far_off[q] ...)
@@ -99,7 +99,7 @@ class Machine:
     machine.Machine plus the parts of kernel.Simulator and controller.Controller that act during a run.
     Built by make_machine().
     """
-    def __init__(self, K, c, n, n_rows, mesh, n_F, rng):
+    def __init__(self, K, c, n, n_rows, mesh, n_F, width, rng):
         self.now, self.n_events, self.seq, self.stop = 0, 0, 0, False
         self.heap = np.zeros(1024, np.int64)
         self.n_heap = 0
@@ -121,13 +121,13 @@ class Machine:
         self.n_flips = 0
         self.port_out, self.port_pending = np.zeros((K, c), np.bool_), np.zeros((K, c), np.bool_)
         self.port_n_pending, self.port_last = np.zeros(K, np.int64), np.full(K, -1, np.int64)
-        self.port_free, self.port_syncing = np.zeros(K, np.int64), np.zeros(K, np.int64)
+        self.port_free, self.port_syncing = np.zeros((K, width), np.int64), np.zeros(K, np.int64)
         self.port_sending = np.zeros(K, np.bool_)
         self.port_flips, self.port_sent, self.port_pending_max = np.zeros(K, np.int64), np.zeros(K, np.int64), np.zeros(K, np.int64)
         self.mesh = mesh
         self.mesh_core, self.fanout_ptr, self.fanout = np.zeros(n, np.int64), np.zeros(n + 1, np.int64), np.zeros(0, np.int64)
         self.mesh_R, self.mesh_Q = np.zeros(K, np.int64), np.zeros(K, np.int64)
-        self.link_free, self.load = np.zeros((mesh, mesh, 4), np.int64), np.zeros((mesh, mesh, 4), np.int64)
+        self.link_free, self.load = np.zeros((mesh, mesh, 4, width), np.int64), np.zeros((mesh, mesh, 4), np.int64)
         self.rx_free = np.zeros(K, np.int64)
         self.rng = rng
         self.in_flight = 0
@@ -441,7 +441,7 @@ class Machine:
         self.port_pending_max[p] = max(self.port_pending_max[p], self.port_n_pending[p])
         if self.port_pending[p, k] and not self.port_sending[p]:
             self.port_sending[p] = True
-            self.sim_schedule(max(self.now, self.port_free[p]), EDGE, SEND, p, 0)
+            self.sim_schedule(max(self.now, self.port_free[p].min()), EDGE, SEND, p, 0)
 
     def port_send(self, p):
         """
@@ -461,9 +461,10 @@ class Machine:
         self.port_last[p] = k
         self.mesh_send(self.ids[p, k])
         self.port_sent[p] += 1
-        self.port_free[p] = self.now + self.t_link
+        lane = np.argmin(self.port_free[p])                     # the first free lane
+        self.port_free[p, lane] = self.now + self.t_link
         if self.port_n_pending[p] > 0:
-            self.sim_schedule(self.port_free[p], EDGE, SEND, p, 0)
+            self.sim_schedule(max(self.now, self.port_free[p].min()), EDGE, SEND, p, 0)
         else:
             self.port_sending[p] = False
 
@@ -509,10 +510,11 @@ class Machine:
 
     def mesh_link(self, r, q, w, k):
         """
-        A copy goes out of router (r, q) in direction w. It waits until the link is free.
+        A copy goes out of router (r, q) in direction w. Takes the first free lane, waits if all are busy.
         """
-        t = max(self.now, self.link_free[r, q, w])
-        self.link_free[r, q, w] = t + self.t_link
+        lane = np.argmin(self.link_free[r, q, w])               # the first free lane
+        t = max(self.now, self.link_free[r, q, w, lane])
+        self.link_free[r, q, w, lane] = t + self.t_link
         self.load[r, q, w] += 1
         self.link_waits += t > self.now
         self.link_wait_max = max(self.link_wait_max, (t - self.now) // self.period)
@@ -698,7 +700,7 @@ def make_machine(J, h, spec, v0, rng):
     n, K, c = len(h), m.K, spec.core.c
     s = np.where(v0 >= 0, 1, -1)
     n_rows = np.array([len(r) for r in m.rows])
-    mach = Machine(K, c, n, max(1, n_rows.sum()), spec.net.mesh, clock.cycles(spec.far.t_pipe) // clock.period + 2, rng)
+    mach = Machine(K, c, n, max(1, n_rows.sum()), spec.net.mesh, clock.cycles(spec.far.t_pipe) // clock.period + 2, spec.net.width, rng)
 
     # timebase, node, crossbar, core
     mach.period = clock.period

@@ -78,6 +78,7 @@ class NetSpec(Spec):
     t_hop       : int  = p(2, 'cycles', 'per router jump')
     t_chip      : int  = p(10, 'cycles', 'per chip edge crossed')
     t_link      : int  = p(1, 'cycles', 'per packet on a port')
+    width       : int  = p(1, 'lanes', 'parallel lanes per link and send port, each carries one spin packet per t_link')
     t_rx        : int  = p(0, 'cycles', 'per packet from the router into the far unit')
     dither      : int  = p(0, 'cycles', 'random extra delay per packet (for stopping oscillation)')
 

@@ -18,8 +18,8 @@ class Mesh:
     """
     One router per core. A packet for spin k goes to every core with a row for k.
     Packets are sent in a "XY" tree. First along X and then Y. The router copies
-    the packet where destinations split. Each link carries one packet per t_link cycles.
-    If the link is busy it waits in the router.
+    the packet where destinations split. Each link has width lanes, each carries one packet
+    per t_link cycles. If all lanes are busy it waits in the router.
     """
     def __init__(self, sim, clock, spec, mapping, rng):
         self.sim = sim
@@ -31,6 +31,7 @@ class Mesh:
         self.t_hop = clock.cycles(spec.t_hop)
         self.t_chip = clock.cycles(spec.t_chip)
         self.t_link = clock.cycles(spec.t_link)
+        self.width = spec.width
         self.link_free = {}                                 # (row, col, way)
         self.load = {}                                      # (row, col, way)
         self.dither = spec.dither
@@ -66,10 +67,12 @@ class Mesh:
 
     def link(self, r, q, w, dests, k):
         """
-        A copy goes out the router (r, q) in direction w. Waits until the link is free.
+        A copy goes out the router (r, q) in direction w. Takes the first free lane, waits if all are busy.
         """
-        t = max(self.sim.now, self.link_free.get((r, q, w), 0))
-        self.link_free[(r, q, w)] = t + self.t_link
+        free = self.link_free.setdefault((r, q, w), [0] * self.width)  # when each lane is free
+        lane = int(np.argmin(free))                         # the first free lane
+        t = max(self.sim.now, free[lane])
+        free[lane] = t + self.t_link
         self.load[(r, q, w)] = self.load.get((r, q, w), 0) + 1
         self.stats['link_waits'] += t > self.sim.now
         self.stats['link_wait_max'] = max(self.stats['link_wait_max'], (t - self.sim.now) // self.period)
