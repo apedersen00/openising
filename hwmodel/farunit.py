@@ -4,8 +4,6 @@ farunit.py
 Computes equivalent bias from far spins (in other cores).
 """
 
-from collections import deque
-
 import numpy as np
 
 
@@ -21,9 +19,9 @@ class FarUnit:
         self.row = {k: r for r, k in enumerate(rows)}           # (addr, spin) pairs for SRAM
         self.sram = sram                                        # Row r has J[rows[r], spin i]
         self.known = np.array(s_far)                            # bit 0, the sigma the accumulators currently include
-        self.target = self.known.copy()                         # bit 1, the sigma affter every packet received
-        self.queued = np.zeros(len(rows), dtype=bool)           # bit 2, this row is waiting in the FIFO 
-        self.fifo = deque()                                     # FIFO of row addresses
+        self.pending = np.zeros(len(rows), dtype=bool)          # pending far spins
+        self.n_pending = 0
+        self.last = -1
         self.acc = sram.T @ self.known                          # load accumulator with starting field
         self.fdac = fdac                                        # far spin current dac
         self.lanes = spec.lanes                                 # rows read per cycle
@@ -32,7 +30,7 @@ class FarUnit:
         self.touch = touch                                      # function in the controller
         self.running = False                                    # a step is already being performed (forces it to be sequential)
         self.writes = 0                                         # count far spin bias writess
-        self.stats = dict(packets=0, merged=0, applied=0, fifo_max=0)
+        self.stats = dict(packets=0, cancelled=0, applied=0, pending_max=0)
         core.set_far(self.code())
 
     def code(self):
@@ -49,16 +47,13 @@ class FarUnit:
         """
         A packet is received from the mesh network. A far spin k has flipped.
         """
-        r = self.row[k]                     # look up the row address
-        self.target[r] = -self.target[r]    # that row's target bit is flipped
+        r = self.row[k]                         # look up the row address
+        self.pending[r] = not self.pending[r]   # flip the pending bit (two flips cancel)
+        self.n_pending += 1 if self.pending[r] else - 1
         self.stats['packets'] += 1
-        if self.queued[r]:                  # if already in the queue, merge the events
-            self.stats['merged'] += 1
-            return
-        self.queued[r] = True               # queue the event
-        self.fifo.append(r)
-        self.stats['fifo_max'] = max(self.stats['fifo_max'], len(self.fifo))
-        if not self.running:
+        self.stats['cancelled'] += not self.pending[r]
+        self.stats['pending_max'] = max(self.stats['pending_max'], self.n_pending)
+        if self.pending[r] and not self.running:
             self.running = True
             self.sim.after(0, self.step)
 
@@ -66,19 +61,21 @@ class FarUnit:
         """
         One cycle.
         """
-        changed = False
-        for _ in range(min(self.lanes, len(self.fifo))):            # use all lanes
-            r = self.fifo.popleft()                                 # pop the fifo for the oldest row
-            self.queued[r] = False
-            if self.target[r] != self.known[r]:                     # an odd number of packets has arrived: flip
-                self.known[r] = self.target[r]
-                self.acc += 2 * self.known[r] * self.sram[r]        # compute new local field
-                self.stats['applied'] += 1
-                changed = True
-        if changed:
+        # round robin style processing of pending spins
+        idx = np.flatnonzero(self.pending)
+        first = np.searchsorted(idx, self.last + 1)
+        take = np.concatenate((idx[first:], idx[:first]))[:self.lanes]
+        for r in take:
+            self.pending[r] = False
+            self.known[r] = - self.known[r]
+            self.acc += 2 * self.known[r] * self.sram[r]
+        self.n_pending -= len(take)
+        self.stats['applied'] += len(take)
+        if len(take):
+            self.last = take[-1]
             self.writes += 1
             self.sim.after(self.t_pipe, self.write, self.code())
-        if self.fifo:
+        if self.n_pending:
             self.sim.after(self.period, self.step)
         else:
             self.running = False
