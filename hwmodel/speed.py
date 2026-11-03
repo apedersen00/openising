@@ -60,7 +60,7 @@ def random160():
 
 def cases():
     """
-    name: (problem, spec). R160 is Test B; the others use dither 2.
+    name: (problem, spec). R160 is Test B; the others use dither 2. G14L is G14 with local kicks.
     """
     s = MachineSpec()
     runs = lambda n, **kw: replace(s.control, n_runs=n, **kw)
@@ -69,6 +69,7 @@ def cases():
         'G14':   (lambda: gset('G14'), replace(s, net=replace(s.net, dither=2), control=runs(10))),
         'SK512': (lambda: sk(512), replace(s, net=replace(s.net, dither=2), control=runs(10, t_quiet=200_000))),
         'G22':   (lambda: gset('G22'), replace(s, net=replace(s.net, mesh=8, dither=2), control=runs(3))),
+        'G14L':  (lambda: gset('G14'), replace(s, net=replace(s.net, dither=2), control=runs(10, kick_mode='local'))),
     }
 
 

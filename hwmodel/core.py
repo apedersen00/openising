@@ -80,15 +80,15 @@ class AnalogCore:
         self.held = True
         self.schedule()
 
-    def preset(self, s):
+    def preset(self, s, send=True):
         """
-        While frozen, set all nodes to the rail of its sigma.
+        While frozen, set all nodes to the rail of its sigma. send=False: the flips are not sent (local kick).
         """
         self.node.V = np.where(s > 0, self.node.spec.V_high, self.node.spec.V_low)
         self.node.s = np.array(s)
         for k in np.flatnonzero(self.xb.s != s):
             self.xb.flip(k)
-            if self.on_flip:
+            if self.on_flip and send:
                 self.on_flip(k)
 
     def release(self):

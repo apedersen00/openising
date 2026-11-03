@@ -90,3 +90,17 @@ class FarUnit:
         self.writes -= 1
         self.core.set_far(F)
         self.touch()
+
+    def kick(self, s_win, s):
+        """
+        Local kick, no packets. Restore the winner's far spins and accumulators (snapshot), then read the rows
+        of the far spins the kick flips (every core knows the cluster from the same generator).
+        """
+        self.known = np.array(s_win)
+        self.acc = self.sram.T @ self.known
+        self.core.set_far(self.code())
+        self.pending = np.array(s) != self.known
+        self.n_pending = int(self.pending.sum())
+        if self.n_pending:
+            self.running = True
+            self.sim.schedule(max(self.sim.now, self.free), self.step)

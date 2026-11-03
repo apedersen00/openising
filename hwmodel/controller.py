@@ -29,6 +29,7 @@ class Controller:
         self.t_quiet = c.t_quiet
         self.t_max = c.t_max
         self.t_restart = self.machine.clock.cycles(c.t_restart)
+        self.kick_mode = c.kick_mode
         self.check = None
         self.best_s, self.best_E = None, np.inf
         self.start, self.end, self.E, self.t_run, self.why = [], [], [], [], []
@@ -68,14 +69,24 @@ class Controller:
         """
         for core in self.machine.cores:
             core.hold()
+        if self.kick_mode == 'local':
+            self.sim.run()                                          # deliver what is still in flight (after t_max)
         self.sim.after(self.t_restart, self.preset, s, priority=CONTROL)
         self.sim.run()
         for core in self.machine.cores:
             core.release()
 
     def preset(self, s):
-        for p, core in enumerate(self.machine.cores):
-            core.preset(s[self.machine.map.spins[p]])
+        """
+        'hold': the flips go over the mesh.
+        'local': no packets. Every core knows the cluster (the same generator in every core) and keeps a
+        snapshot of the winner, so every far unit restores the winner and reads the rows the kick flips.
+        """
+        m = self.machine
+        for p, core in enumerate(m.cores):
+            core.preset(s[m.map.spins[p]], send=self.kick_mode != 'local')
+            if self.kick_mode == 'local':
+                m.fars[p].kick(self.best_s[m.map.rows[p]], s[m.map.rows[p]])
 
     def solve(self):
         """

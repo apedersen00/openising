@@ -89,7 +89,7 @@ spec = [
     ('far_packets', int64[:]), ('far_cancelled', int64[:]), ('far_applied', int64[:]), ('far_pending_max', int64[:]),
     # controller.py: Controller
     ('last', int64), ('t_quiet', int64), ('t_max', int64), ('t_restart', int64), ('check', int64[:]),
-    ('kick_s', int64[:]),
+    ('kick_s', int64[:]), ('kick_win', int64[:]), ('kick_local', boolean),
 ]
 
 
@@ -145,7 +145,8 @@ class Machine:
         self.far_applied, self.far_pending_max = np.zeros(K, np.int64), np.zeros(K, np.int64)
         self.last = 0
         self.check = np.full(2, -1, np.int64)
-        self.kick_s = np.zeros(n, np.int64)
+        self.kick_s, self.kick_win = np.zeros(n, np.int64), np.zeros(n, np.int64)
+        self.kick_local = False                                     # kick_mode == 'local'
 
     # ------------------------------------------------------------------ kernel.py: Simulator
 
@@ -394,9 +395,9 @@ class Machine:
         self.core_held[p] = True
         self.core_schedule(p)
 
-    def core_preset(self, p, s):
+    def core_preset(self, p, s, send):
         """
-        While frozen, set all nodes to the rail of its sigma.
+        While frozen, set all nodes to the rail of its sigma. send=False: the flips are not sent (local kick).
         """
         for i in range(self.n_spin[p]):
             self.node_V[p, i] = self.V_high if s[i] > 0 else self.V_low
@@ -404,7 +405,8 @@ class Machine:
         for k in range(self.n_spin[p]):
             if self.xb_s[p, k] != s[k]:
                 self.xb_flip(p, k)
-                self.port_flip(p, k)                            # on_flip
+                if send:
+                    self.port_flip(p, k)                        # on_flip
 
     def core_release(self, p):
         """
@@ -607,6 +609,28 @@ class Machine:
         self.core_set_far(q, F)
         self.ctl_touch()
 
+    def far_kick(self, q):
+        """
+        Local kick, no packets. Restore the winner's far spins (kick_win) and accumulators (snapshot), then read
+        the rows of the far spins the kick (kick_s) flips.
+        """
+        o = self.far_off[q]
+        self.far_n_pending[q] = 0
+        for k in range(len(self.kick_s)):
+            r = self.far_row[q, k]
+            if r >= 0:
+                self.known[o + r] = self.kick_win[k]
+                self.far_pending[o + r] = self.kick_s[k] != self.kick_win[k]
+                self.far_n_pending[q] += self.far_pending[o + r]
+        for c in range(self.n_spin[q]):
+            self.acc[q, c] = 0
+            for r in range(self.far_n_rows[q]):
+                self.acc[q, c] += self.sram[o + r, c] * self.known[o + r]
+        self.core_set_far(q, self.far_code(q))
+        if self.far_n_pending[q]:
+            self.far_running[q] = True
+            self.sim_schedule(max(self.now, self.far_free[q]), EDGE, STEP, q, 0)
+
     # ------------------------------------------------------------------ machine.py: Machine
 
     def start(self):
@@ -670,21 +694,30 @@ class Machine:
         self.sim_cancel(self.check[0], self.check[1])
         return why == STOPPED, self.now - t0
 
-    def ctl_kick(self, s):
+    def ctl_kick(self, s, s_win):
         """
-        Freeze all cores. t_restart later force s on the rails.
+        Freeze all cores. t_restart later force s on the rails. s_win: the winner (Controller.best_s).
         """
         for p in range(self.K):
             self.core_hold(p)
+        if self.kick_local:
+            self.sim_run(-1, -1)                                    # deliver what is still in flight (after t_max)
         self.kick_s[:] = s
+        self.kick_win[:] = s_win
         self.sim_schedule(self.now + self.t_restart, CONTROL, PRESET, 0, 0)
         self.sim_run(-1, -1)
         for p in range(self.K):
             self.core_release(p)
 
     def ctl_preset(self):
+        """
+        'hold': the flips go over the mesh. 'local': no packets, every far unit restores the winner and reads
+        the rows the kick flips.
+        """
         for p in range(self.K):
-            self.core_preset(p, self.kick_s[self.ids[p, :self.n_spin[p]]])
+            self.core_preset(p, self.kick_s[self.ids[p, :self.n_spin[p]]], not self.kick_local)
+            if self.kick_local:
+                self.far_kick(p)
 
 
 def make_machine(J, h, spec, v0, rng):
@@ -748,6 +781,7 @@ def make_machine(J, h, spec, v0, rng):
     # controller
     ctl = spec.control
     mach.t_quiet, mach.t_max, mach.t_restart = ctl.t_quiet, ctl.t_max, clock.cycles(ctl.t_restart)
+    mach.kick_local = ctl.kick_mode == 'local'
     mach.start()
     return mach, m
 
@@ -768,6 +802,14 @@ class Controller:
         self.sizes = np.round(np.linspace(max(1, c.kick_start * n), max(1, c.kick_end * n), c.n_runs)).astype(int)
         self.best_s, self.best_E = None, np.inf
         self.start, self.end, self.E, self.t_run, self.why = [], [], [], [], []
+        self.t_end, self.traffic = [], []                           # bench: hardware time at the end of every run, counts() during it
+
+    def counts(self):
+        """
+        Packets delivered, link waits, far rows read and packets sent so far, all cores together.
+        """
+        m = self.machine
+        return np.array([m.deliveries, m.link_waits, m.far_applied.sum(), m.port_sent.sum()])
 
     def energy(self, s):
         """
@@ -782,8 +824,11 @@ class Controller:
         n = len(self.v0)
         for i in range(self.n_runs):
             self.start.append(self.machine.s)
+            before = self.counts()
             quiet, t = self.machine.ctl_run()
             self.t_run.append(t)
+            self.t_end.append(self.machine.now)
+            self.traffic.append(self.counts() - before)
             self.why.append('quiet' if quiet else 't_max')
             s = self.machine.s
             E = self.energy(s)
@@ -794,7 +839,7 @@ class Controller:
             if i < self.n_runs - 1:
                 s = self.best_s.copy()
                 s[self.rng.choice(n, self.sizes[i], replace=False)] *= -1
-                self.machine.ctl_kick(s)
+                self.machine.ctl_kick(s, self.best_s)
         return self.best_s, self.best_E
 
     def flips(self):

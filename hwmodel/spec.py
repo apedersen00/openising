@@ -101,7 +101,7 @@ class ControlSpec(Spec):
     n_runs      : int   = p(300, 'runs', 'restarts per solve')
     kick_start  : float = p(0.2, 'of N', 'cluster size of the first kick')
     kick_end    : float = p(0.0, 'of N', 'cluster size of the last kick (0 = one spin)')
-    kick_mode   : str   = p('hold', '', "'hold': nodes are frozen while the kick is processed, 'queued': kicks propagate while cores are running")
+    kick_mode   : str   = p('hold', '', "'hold': nodes are frozen while the kick is processed, 'queued': kicks propagate while cores are running, 'local': frozen, no kick packets (shared generator + winner snapshot)")
     t_quiet     : int   = p(60_000, 'ps', 'read out after this long without activity')
     t_max       : int   = p(1_500_000, 'ps', 'read out at the latest after this long')
     t_restart   : int   = p(20, 'cycles', 'readout, energy, winner and kick between runs')
