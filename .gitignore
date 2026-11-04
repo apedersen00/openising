@@ -41,3 +41,4 @@ ising/*/*.pdf
 **/experiments/*
 **/tests/*
 '.idea' 
+/CLAUDE.md
