@@ -1,7 +1,7 @@
 """
 Benchmark the multi-core machine (hwmodel/fast.py) on openising's problems.
 
-Every problem runs on one big crossbar, on 4 cores on one chip and on 4 cores on 4 chiplets, while R is swept.
+Every problem runs on one big crossbar, on 4 cores on one chip and on 4 chiplets of 4 cores, while R is swept.
 R is the number of clock cycles per full-scale ramp: how fast the digital side is compared to the analog. Small R =
 slow digital or fast analog. The clock stays at 1 GHz, so R sets I_unit: the largest coupling gives 20 uA / R.
 
@@ -31,6 +31,7 @@ import json
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
@@ -52,6 +53,8 @@ from ising.stages.maxcut_parser_stage import MaxcutParserStage
 from ising.stages.qkp_parser_stage import QKPParserStage
 from ising.stages.tsp_parser_stage import TSPParserStage
 
+warnings.filterwarnings('ignore', category=FutureWarning)              # openising's networkx calls
+
 WORKERS = min(30, os.cpu_count())
 SEEDS = 10
 RUNS = 300                              # restarts per solve
@@ -63,9 +66,9 @@ BENCH = ROOT / 'ising' / 'benchmarks'
 OUT = ROOT / 'data' / 'hwmodel' / 'bench'
 
 CONFIGS = {                             # cores, mesh (tiles per side), chip (tiles per chip side)
-    'crossbar': (1, 1, 1),              # one core with every spin: no mesh, no far units
-    '4core':    (4, 2, 2),              # 2 x 2 cores on one chip
-    '4chiplet': (4, 2, 1),              # 2 x 2 cores, every core on its own chip (t_chip per chip edge)
+    'crossbar':   (1, 1, 1),            # one core with every spin: no mesh, no far units
+    '4core':      (4, 2, 2),            # 2 x 2 cores on one chip
+    '4x4chiplet': (16, 4, 2),           # 2 x 2 chiplets of 2 x 2 cores (t_chip per chip edge)
 }
 
 PROBLEMS = {                            # name: family, kind, file in ising/benchmarks
