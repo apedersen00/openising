@@ -1,32 +1,25 @@
 """
-Benchmark the multi-core machine (hwmodel/fast.py) against the ideal single crossbar (solver_event, no digital).
-Every setting uses the same seeds, so settings can be compared seed by seed.
+Benchmark the multi-core machine (hwmodel/fast.py) on openising's problems.
 
-    python scripts/bench_hwmodel.py E0              # every problem
-    python scripts/bench_hwmodel.py E0 G14 SK512    # some problems
+Every problem runs on one big crossbar, on 4 cores on one chip and on 4 cores on 4 chiplets, while R is swept.
+R is the number of clock cycles per full-scale ramp: how fast the digital side is compared to the analog. Small R =
+slow digital or fast analog. The clock stays at 1 GHz, so R sets I_unit: the largest coupling gives 20 uA / R.
 
-R = full-scale ramp / clock period (cycles per ramp). Digital times stay in cycles, t_quiet and t_max are set in ramps.
+    python scripts/bench_hwmodel.py                 # every problem
+    python scripts/bench_hwmodel.py G14 burma14     # some problems
 
-Output in data/hwmodel/<experiment>/:
-    meta.json                   commit hash, date, seeds, base spec, problems (n, best known cut, J sum, t_quiet)
-    settings.csv                one row per setting: its overrides, R and the full-scale ramp in ps
-    <problem>/<setting>.npz     per (seed, run): E (original J), t_end (ps, end of the run), t_run (ps), quiet, flips,
-                                and during the run: deliveries, link_waits, far_reads (rows), sent (packets)
-                                per seed: best_s, events, wall (s, a worker's first solve includes ~15 s of numba
-                                compile), cycles (whole solve), link_wait_max (cycles),
-                                link_load_max and far_read_max (per cycle, busiest link / far unit over the solve),
-                                far_pending_max, port_pending_max, cancelled (fraction of far packets),
-                                load (mesh, mesh, 4: packets per link, ways E W S N), far_reads_core, far_packets_core,
-                                sent_core (per core, whole solve), tile (per core, row-major in the mesh)
-                                mapping (the same for every seed): K, mesh, ramp_ps, t_quiet, t_max (ps), local_frac
-                                (couplings inside a core), rows_mean, rows_max (far rows per core), lat0_mean, lat0_max
-                                (zero-load far latency per (spin, destination core) pair in cycles, mean sync and dither)
-    <problem>/ideal.npz         the event solver (one crossbar, no digital) with the same start voltages and kicks:
-                                per (seed, run): E, t_settle (ramps), flips; per seed: best_s
+Quantization is off (32-bit cells, exact h and far DAC). TSP and QKP use openising's default penalty weight (1).
+Every setting uses the same seeds.
 
-A Max-Cut cut is -E/2 - J_sum/4. Kick time after run i is t_end[i + 1] - t_run[i + 1] - t_end[i], and the traffic
-during kicks is the per-core total minus the sum over runs. Finished files are skipped, so a stopped run can be
-restarted.
+Output in data/hwmodel/bench/:
+    meta.json                       commit, date and the constants below
+    problems.csv                    name, family, kind, n, density (of J), best (best known cost)
+    <problem>/<config>_R<R>.csv     one row per run: seed, run, E (openising's energy), cost, t_end (ns from the
+                                    start to the end of the run), flips (during the run), t_max (the run hit t_max)
+
+cost is the objective, lower is better: -cut (Max-Cut), x Q x (QUBO), tour length (TSP) and -profit (QKP).
+NaN = the state breaks a constraint. Time in full-scale ramps is t_end / R.
+Finished files are skipped, so a stopped benchmark can be restarted.
 
 *ai-generated*
 """
@@ -40,9 +33,11 @@ import sys
 import time
 from dataclasses import replace
 from datetime import datetime
+from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 
@@ -50,177 +45,174 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from hwmodel import fast
-from hwmodel.dac import CurrentDAC
 from hwmodel.spec import MachineSpec
-from hwmodel.speed import gset, sk
-from lagrange import analog_event
+from ising.generators.TSP import TSP
+from ising.stages.biqmac_parser_stage import BiqMacParserStage
+from ising.stages.maxcut_parser_stage import MaxcutParserStage
+from ising.stages.qkp_parser_stage import QKPParserStage
+from ising.stages.tsp_parser_stage import TSPParserStage
 
 WORKERS = min(30, os.cpu_count())
 SEEDS = 10
-OUT = ROOT / 'data' / 'hwmodel'
+RUNS = 300                              # restarts per solve
+R_LIST = [4, 8, 16, 32, 64, 128, 256]   # clock cycles per full-scale ramp
+CELL_BITS = 32                          # quantization off
+T_QUIET = 7.0                           # read out after this many full-scale ramps without activity
+T_MAX = 52.5                            # read out at the latest after this many full-scale ramps
+BENCH = ROOT / 'ising' / 'benchmarks'
+OUT = ROOT / 'data' / 'hwmodel' / 'bench'
 
-BASE = MachineSpec()
-BASE = replace(BASE, net=replace(BASE.net, dither=2), control=replace(BASE.control, kick_mode='local'))
-QUIET = {'unit': 2.1, 'weighted': 7.0}      # t_quiet in ramps: 60 ns and 200 ns (C dV / I_unit) at R = 28.6
-T_MAX = 52.5                                # t_max in ramps: 1.5 us at R = 28.6
-
-PROBLEMS = ['G14', 'G15', 'G16', 'G22', 'G23', 'G24', 'G1', 'G2', 'G3', 'G48', 'G49', 'G50', 'K2000',
-            'SK256', 'SK512', 'SK1024', 'SK2048']
-
-# setting name: overrides as 'part.field': value, or 'R': cycles per ramp (sets I_unit)
-EXPERIMENTS = {
-    'E0': {                                 # the same R through I_unit and through f_core: must agree in ramps
-        'I=200nA':  {'node.I_unit': 200e-9},    # R = 14.3
-        'f=500MHz': {'clock.f_core': 0.5e9},    # R = 14.3
-        'I=50nA':   {'node.I_unit': 50e-9},     # R = 57.1
-        'f=2GHz':   {'clock.f_core': 2e9},      # R = 57.1
-    },
+CONFIGS = {                             # cores, mesh (tiles per side), chip (tiles per chip side)
+    'crossbar': (1, 1, 1),              # one core with every spin: no mesh, no far units
+    '4core':    (4, 2, 2),              # 2 x 2 cores on one chip
+    '4chiplet': (4, 2, 1),              # 2 x 2 cores, every core on its own chip (t_chip per chip edge)
 }
+
+PROBLEMS = {                            # name: family, kind, file in ising/benchmarks
+    'G1':                   ('maxcut', 'random 6% +1',          'G/G1.txt'),
+    'G6':                   ('maxcut', 'random 6% ±1',          'G/G6.txt'),
+    'G11':                  ('maxcut', 'toroidal ±1',           'G/G11.txt'),
+    'G14':                  ('maxcut', 'planar +1',             'G/G14.txt'),
+    'G18':                  ('maxcut', 'planar ±1',             'G/G18.txt'),
+    'G22':                  ('maxcut', 'random 1% +1',          'G/G22.txt'),
+    'G32':                  ('maxcut', 'toroidal ±1',           'G/G32.txt'),
+    'G35':                  ('maxcut', 'planar +1',             'G/G35.txt'),
+    'K2000':                ('maxcut', 'complete ±1',           'G/K2000.txt'),
+    'w05_100.0':            ('maxcut', 'random 50% -10..10',    'biqmac/rudy/w05_100.0'),
+    't2g20_5555':           ('maxcut', '2D toroidal gaussian',  'biqmac/ising/t2g20_5555'),
+    't3g7_5555':            ('maxcut', '3D toroidal gaussian',  'biqmac/ising/t3g7_5555'),
+    'ising2.5-300_5555':    ('maxcut', '1D chain long range',   'biqmac/ising/ising2.5-300_5555'),
+    'bqp250-1':             ('qubo',   'beasley 10%',           'biqmac/beasley/bqp250-1.sparse'),
+    'bqp500-1':             ('qubo',   'beasley 10%',           'biqmac/beasley/bqp500-1.sparse'),
+    'gka3f':                ('qubo',   'gka 50%',               'biqmac/gka/gka3f.sparse'),
+    'be200.8.1':            ('qubo',   'be 80%',                'biqmac/be/be200.8.1.sparse'),
+    'burma14':              ('tsp',    'geographic',            'TSP/burma14.tsp'),
+    'gr21':                 ('tsp',    'distance matrix',       'TSP/gr21.tsp'),
+    'fri26':                ('tsp',    'distance matrix',       'TSP/fri26.tsp'),
+    'bayg29':               ('tsp',    'distance matrix',       'TSP/bayg29.tsp'),
+    'jeu_100_25_1':         ('qkp',    'profits 25%',           'Knapsack/jeu_100_25_1.txt'),
+    'jeu_100_100_1':        ('qkp',    'profits 100%',          'Knapsack/jeu_100_100_1.txt'),
+    'jeu_200_50_1':         ('qkp',    'profits 50%',           'Knapsack/jeu_200_50_1.txt'),
+    'jeu_300_25_1':         ('qkp',    'profits 25%',           'Knapsack/jeu_300_25_1.txt'),
+}
+
+
+def tour(S, W):
+    """
+    Tour length of every state (row of S), NaN when it is not a tour. Spin city * N + time is +1 when the city is
+    visited at that time.
+    """
+    N = len(W)
+    X = S.reshape(len(S), N, N) > 0
+    ok = (X.sum(axis=1) == 1).all(axis=1) & (X.sum(axis=2) == 1).all(axis=1)
+    order = X.argmax(axis=1)                                            # city at every time
+    return np.where(ok, W[order, np.roll(order, -1, axis=1)].sum(axis=1), np.nan)
+
+
+def knapsack(S, P, w, C):
+    """
+    -profit of every state, NaN when the items are over capacity. The first len(w) spins are the items, the rest slack.
+    """
+    X = (S[:, :len(w)] > 0).astype(float)
+    return np.where(X @ w <= C, -((X @ np.triu(P)) * X).sum(axis=1), np.nan)
 
 
 def load(name):
     """
-    J, best known cut (None if unknown) and t_quiet in ramps.
+    openising's Ising model as hwmodel takes it (J symmetric, E = -1/2 s J s - h s), the constant c of openising's
+    energy, the best known cost and cost(S). cost None: the cost is the energy.
     """
-    if name.startswith('SK'):
-        return sk(int(name[2:])), None, QUIET['weighted']
-    lines = (ROOT / 'ising/benchmarks/G/optimal_energy.txt').read_text().split('\n')
-    best = dict(line.split() for line in lines if line.strip())
-    return gset(name), int(best[name]), QUIET['unit']
+    family, _, file = PROBLEMS[name]
+    path = BENCH / file
+    cost = None
+    if family == 'maxcut':
+        graph, best = MaxcutParserStage.G_parser(path)
+        model = MaxcutParserStage.generate_maxcut(graph)
+    elif family == 'qubo':
+        graph, best = BiqMacParserStage.biqmac_parser(path)
+        model = BiqMacParserStage.generate_biqmac(graph)
+    elif family == 'tsp':
+        graph, best = TSPParserStage.TSP_parser(path)
+        model = TSP(graph)
+        cost = partial(tour, W=nx.adjacency_matrix(graph).toarray())
+    else:
+        graph, best = QKPParserStage.QKP_parser(path)                  # as QKPParserStage.generate_knapsack
+        N = len(graph.nodes)
+        P = np.zeros((N, N))
+        for (i, j), value in nx.get_edge_attributes(graph, 'profit').items():
+            P[i, j] = P[j, i] = value
+        w = np.array([graph.edges[i, i]['weight'] for i in range(N)], dtype=float)
+        C = graph.graph['capacity']
+        model = QKPParserStage.knapsack_to_ising(P, C, w, 1.0)
+        cost = partial(knapsack, P=P, w=w, C=C)
+    return (model.J + model.J.T).astype(float), model.h.astype(float), float(model.c), best, cost
 
 
-def make_spec(setting, n, quiet, seed):
+def make_spec(config, R, n, seed):
     """
-    BASE with the overrides, t_quiet and t_max in ramps and the smallest mesh (a multiple of chip) for n spins.
-    Returns the spec and the full-scale ramp in ps.
+    The default spec with the config's cores, R cycles per full-scale ramp (sets I_unit) and quantization off.
     """
-    s = BASE
-    for key, value in setting.items():
-        if key != 'R':
-            part, name = key.split('.')
-            s = replace(s, **{part: replace(getattr(s, part), **{name: value})})
-    full = 2**s.core.cell_bits - 1                                  # full-scale cell current in I_unit
-    if 'R' in setting:
-        I_unit = s.node.C * (s.node.V_high - s.node.V_th) * s.clock.f_core / (setting['R'] * full)
-        s = replace(s, node=replace(s.node, I_unit=I_unit))
-    ramp = s.node.ramp_time(s.node.I_unit * full)
-    K = -(-n // s.core.c)
-    mesh = s.net.chip * -(-int(np.ceil(np.sqrt(K))) // s.net.chip)
-    s = replace(s, net=replace(s.net, mesh=mesh),
-                control=replace(s.control, t_quiet=round(quiet * ramp), t_max=round(T_MAX * ramp), seed=seed))
-    return s, ramp
-
-
-def energy(S, J):
-    """
-    E = -1/2 s J s of every row of S, with the original J.
-    """
-    return -0.5 * ((S @ J) * S).sum(axis=1)
-
-
-def run_machine(J, quiet, setting, seed):
-    spec, ramp = make_spec(setting, len(J), quiet, seed)
-    t0 = time.perf_counter()
-    ctl = fast.Controller(J, np.zeros(len(J)), spec)
-    ctl.solve()
-    wall = time.perf_counter() - t0
-    m = ctl.machine
-    S = np.array(ctl.end, dtype=float)
-    E = energy(S, J)
-    t_end, t_run = np.array(ctl.t_end), np.array(ctl.t_run)
-    t_flip = m.flips_t[:m.n_flips]                                  # in time order
-    cycles = m.now / m.period
-    traffic = np.array(ctl.traffic)
-    mp, net = ctl.map, spec.net
-    src = np.repeat(mp.core, [len(f) for f in mp.fanout])           # every (spin's core, destination core) pair
-    dst = np.concatenate(mp.fanout)
-    lat0 = (max(spec.clock.sync - 0.5, 0) + net.dither / 2 + net.t_inj + spec.far.t_pipe
-            + net.t_hop * mp.hops[src, dst] + net.t_chip * mp.chips[src, dst])
-    rows = [len(r) for r in mp.rows]
-    return dict(
-        E=E, t_end=t_end, t_run=t_run, quiet=np.array(ctl.why) == 'quiet',
-        flips=np.searchsorted(t_flip, t_end, 'right') - np.searchsorted(t_flip, t_end - t_run, 'left'),
-        deliveries=traffic[:, 0], link_waits=traffic[:, 1], far_reads=traffic[:, 2], sent=traffic[:, 3],
-        best_s=S[np.argmin(E)].astype(np.int8), events=m.n_events, wall=wall, cycles=cycles,
-        link_wait_max=m.link_wait_max, link_load_max=m.load.max() / cycles, far_read_max=m.far_applied.max() / cycles,
-        far_pending_max=m.far_pending_max.max(), port_pending_max=m.port_pending_max.max(),
-        cancelled=m.far_cancelled.sum() / m.far_packets.sum(),
-        load=m.load.copy(), far_reads_core=m.far_applied.copy(), far_packets_core=m.far_packets.copy(),
-        sent_core=m.port_sent.copy(), tile=mp.tile,
-        K=mp.K, mesh=net.mesh, ramp_ps=ramp, t_quiet=spec.control.t_quiet, t_max=spec.control.t_max,
-        local_frac=sum(np.count_nonzero(x) for x in mp.local) / np.count_nonzero(mp.J),
-        rows_mean=np.mean(rows), rows_max=np.max(rows), lat0_mean=lat0.mean(), lat0_max=lat0.max(),
-    )
-
-
-def run_ideal(J, seed):
-    """
-    lagrange.solver_event (kept here to count flips) on the machine's codes with fast.Controller's start voltages
-    and kicks.
-    """
-    c, n = BASE.control, len(J)
-    r_v0, _, r_kick = (np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(3))
-    v0 = r_v0.uniform(-1, 1, n)
-    sizes = np.round(np.linspace(max(1, c.kick_start * n), max(1, c.kick_end * n), c.n_runs)).astype(int)
-    clusters = np.zeros((c.n_runs, n), dtype=np.int64)
-    for i in range(c.n_runs - 1):                                   # the controller kicks after every run but the last
-        clusters[i, :sizes[i]] = r_kick.choice(n, sizes[i], replace=False)
-    cell = CurrentDAC(BASE.core.cell_bits, BASE.node.I_unit)
-    Jq = cell.code(J, np.abs(J).max() / cell.max_code).astype(float)  # as Mapping
-    h = np.zeros(n)
-    v, best_s, best_E = v0, None, np.inf
-    states, t_settle, flips = np.zeros((c.n_runs, n)), np.zeros(c.n_runs), np.zeros(c.n_runs, dtype=np.int64)
-    for i in range(c.n_runs):
-        states[i], t_settle[i], flips[i] = analog_event(Jq, h, v, 10**6)
-        E_q = -0.5 * states[i] @ Jq @ states[i]                     # the winner is picked on the codes, as in the machine
-        if E_q < best_E:
-            best_s, best_E = states[i].copy(), E_q
-        v = best_s.copy()
-        v[clusters[i, :sizes[i]]] *= -1
-    E = energy(states, J)
-    return dict(E=E, t_settle=t_settle * cell.max_code,             # in units of C dV / I_unit -> full-scale ramps
-                flips=flips, best_s=states[np.argmin(E)].astype(np.int8))
+    K, mesh, chip = CONFIGS[config]
+    s = MachineSpec()
+    full = 2**CELL_BITS - 1                                             # full-scale cell current in I_unit
+    I_unit = s.node.C * (s.node.V_high - s.node.V_th) * s.clock.f_core / (R * full)
+    ramp = s.node.ramp_time(I_unit * full)                              # ps
+    return replace(s, node=replace(s.node, I_unit=I_unit),
+                   core=replace(s.core, c=-(-n // K), cell_bits=CELL_BITS, h_bits=None),
+                   net=replace(s.net, mesh=mesh, chip=chip, dither=2),
+                   control=replace(s.control, n_runs=RUNS, kick_mode='local', t_quiet=round(T_QUIET * ramp),
+                                   t_max=round(T_MAX * ramp), seed=seed))
 
 
 def task(args):
-    experiment, name, label, setting = args
-    J, _, quiet = load(name)
-    rows = [run_ideal(J, seed) if setting is None else run_machine(J, quiet, setting, seed) for seed in range(SEEDS)]
-    folder = OUT / experiment / name
-    np.savez(folder / f'{label}.tmp.npz', **{k: np.array([r[k] for r in rows]) for k in rows[0]})
-    (folder / f'{label}.tmp.npz').rename(folder / f'{label}.npz')
-    return name, label
-
-
-def main(experiment, names):
-    out = OUT / experiment
-    grid = {'ideal': None} | EXPERIMENTS[experiment]
-    problems = {}
-    for name in names:
-        J, best, quiet = load(name)
-        problems[name] = dict(n=len(J), best=best, J_sum=float(J.sum()), quiet_ramps=quiet)
-        (out / name).mkdir(parents=True, exist_ok=True)
-    meta = dict(commit=subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=ROOT).stdout.strip(),
-                date=datetime.now().isoformat(), seeds=SEEDS, n_runs=BASE.control.n_runs, T_MAX=T_MAX,
-                base=str(BASE), problems=problems)
-    (out / 'meta.json').write_text(json.dumps(meta, indent=2))
+    """
+    Every seed of one problem, config and R. Writes <problem>/<config>_R<R>.csv.
+    """
+    name, config, R = args
+    J, h, c, _, cost = load(name)
     rows = []
-    for label, setting in grid.items():
-        if setting is None:
-            rows.append(dict(setting=label, R=np.inf))
-        else:
-            s, ramp = make_spec(setting, 1, 1, 0)
-            rows.append(dict(setting=label, **setting, R=ramp * s.clock.f_core / 1e12, ramp_ps=ramp))
-    pd.DataFrame(rows).to_csv(out / 'settings.csv', index=False)
+    for seed in range(SEEDS):
+        ctl = fast.Controller(J, h, make_spec(config, R, len(h), seed))
+        ctl.solve()
+        S = np.array(ctl.end, dtype=float)
+        E = -0.5 * ((S @ J) * S).sum(axis=1) - S @ h + c
+        t_end, t_run = np.array(ctl.t_end), np.array(ctl.t_run)
+        t_flip = ctl.machine.flips_t[:ctl.machine.n_flips]
+        rows.append(pd.DataFrame(dict(
+            seed=seed, run=np.arange(RUNS), E=E, cost=E if cost is None else cost(S), t_end=t_end / 1e3,
+            flips=np.searchsorted(t_flip, t_end, 'right') - np.searchsorted(t_flip, t_end - t_run, 'left'),
+            t_max=np.array(ctl.why) == 't_max')))
+    file = OUT / name / f'{config}_R{R}.csv'
+    pd.concat(rows).to_csv(file.with_suffix('.tmp'), index=False)
+    file.with_suffix('.tmp').rename(file)
+    return name, config, R
 
-    tasks = [(experiment, name, label, setting) for name in sorted(names, key=lambda x: -problems[x]['n'])
-             for label, setting in grid.items() if not (out / name / f'{label}.npz').exists()]
+
+def main(names):
+    OUT.mkdir(parents=True, exist_ok=True)
+    problems = []
+    for name in PROBLEMS:
+        J, h, _, best, _ = load(name)
+        n = len(h)
+        problems.append(dict(name=name, family=PROBLEMS[name][0], kind=PROBLEMS[name][1], n=n,
+                             density=np.count_nonzero(J) / (n * (n - 1)), best=best))
+        (OUT / name).mkdir(exist_ok=True)
+    problems = pd.DataFrame(problems)
+    problems.to_csv(OUT / 'problems.csv', index=False)
+    meta = dict(commit=subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, cwd=ROOT).stdout.strip(),
+                date=datetime.now().isoformat(), seeds=SEEDS, runs=RUNS, R=R_LIST, cell_bits=CELL_BITS,
+                t_quiet=T_QUIET, t_max=T_MAX, configs=CONFIGS)
+    (OUT / 'meta.json').write_text(json.dumps(meta, indent=2))
+
+    n = dict(zip(problems.name, problems.n))
+    tasks = [(name, config, R) for name in sorted(names, key=lambda x: -n[x]) for config in CONFIGS for R in R_LIST
+             if not (OUT / name / f'{config}_R{R}.csv').exists()]
     print(f'{len(tasks)} tasks on {WORKERS} workers', flush=True)
     t0 = time.perf_counter()
     with Pool(WORKERS) as pool:
-        for i, (name, label) in enumerate(pool.imap_unordered(task, tasks)):
-            print(f'{i + 1}/{len(tasks)}  {name} {label}  {time.perf_counter() - t0:.0f} s', flush=True)
+        for i, (name, config, R) in enumerate(pool.imap_unordered(task, tasks)):
+            print(f'{i + 1}/{len(tasks)}  {name} {config} R={R}  {time.perf_counter() - t0:.0f} s', flush=True)
 
 
 if __name__ == '__main__':
-    main(sys.argv[1], sys.argv[2:] or PROBLEMS)
+    main(sys.argv[1:] or list(PROBLEMS))
